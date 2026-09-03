@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
     xmlns:da="http://dataaccessioner.org/schema/dda-1-1" xmlns:premis="info:lc/xmlns/premis-v2"
     xmlns:dcx="http://purl.org/dc/xml/" version="1.0">
