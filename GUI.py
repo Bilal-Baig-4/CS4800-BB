@@ -6,7 +6,7 @@ import logging
 import traceback
 from datetime import datetime
 
-from test import (
+from pipeline import (
     generate_data_accessioner_xml,
     run_xslt_processor,
     run_fixity,
@@ -62,8 +62,8 @@ def do_update_db():
         )
 
         if success:
-            import test as test_module
-            test_module.AV_AVAILABLE = True
+            import pipeline as pipeline_module
+            pipeline_module.AV_AVAILABLE = True
             chk_av.config(state="normal")
             av_var.set(True)
             av_status_var.set(f"Database ready — {_db_info_string()}")
@@ -134,8 +134,8 @@ def run_pipeline():
         clean_files = None
 
         if do_av:
-            import test as test_module
-            if not test_module.AV_AVAILABLE:
+            import pipeline as pipeline_module
+            if not pipeline_module.AV_AVAILABLE:
                 status_var.set("Step 1/6 — Malware database not found, skipping scan...")
                 logging.warning("Malware hash database missing. Skipping antivirus scan.")
             else:
