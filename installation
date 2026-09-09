@@ -1,1 +1,25 @@
-Download GUI.py, files.html.xslt, pipeline.py, and files.csv.xslt
+Archives Pipeline Installation
+
+1. Clone the GitHub repository or download the following files:
+   - GUI.py
+   - pipeline.py
+   - files.csv.xslt
+   - files.html.xslt
+
+2. Make sure Python is installed.
+
+3. Install the required Python packages:
+
+   py -m pip install lxml
+   py -m pip install bagit
+
+4. Open the project folder in VS Code.
+
+5. Run the pipeline GUI:
+
+   py GUI.py
+
+Notes:
+- GUI.py, pipeline.py, and both XSLT files should remain in the same folder.
+- BagIt is optional, but it is required if you want to use the BagIt packaging step.
+- If the `python` command does not work on Windows, use `py` instead.
