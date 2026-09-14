@@ -1,4 +1,4 @@
-# Automation for Data Accessioner, XSLTProcessor, hashlib, OpenShield, and DART. 
+# Automation for Data Accessioner, XSLTProcessor, hashlib, Windows Defender, and DART. 
 
 ## Data Accessioner
 - Transfers files from disks onto a file server
@@ -40,7 +40,11 @@
       <img width="1856" height="466" alt="Screenshot 2025-12-08 132132" src="https://github.com/user-attachments/assets/c4ef74c0-e006-4ced-b952-62ab97164c75" />
 
 ## Virus scanning
-- Runs Open Shield, a simple and fast antivirus check written in Python and using a database from MalwareBazaar.
+- Runs local Microsoft Defender Antivirus scans using `MpCmdRun.exe`.
+- Scans files individually and records clean, flagged, skipped, or error results.
+- Uses `-DisableRemediation` so detections are reported without intentional remediation.
+- Defender-flagged files can be excluded from ingest.
+- Google-native files must be exported before their contents can be scanned.
 
 ## Bagging function (optional)
 - Bundles files and metadata based on APTrust's Digital Archivist's Resource Tool (DART).
