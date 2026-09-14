@@ -12,11 +12,10 @@ from pipeline import (
     run_fixity,
     generate_summary_report,
     run_antivirus_scan,
-    update_malware_db,
     create_bag,
     BAGIT_AVAILABLE,
     AV_AVAILABLE,
-    MALWARE_DB_PATH,
+    DEFENDER_PATH,
     APTRUST_ACCESS_VALUES,
     APTRUST_STORAGE_OPTIONS,
 )
@@ -39,57 +38,6 @@ def set_inputs_locked(locked: bool):
                 widget.config(state="disabled" if locked else "normal")
         except tk.TclError:
             pass
-
-
-# ==========================
-# DATABASE UPDATE
-# ==========================
-
-def do_update_db():
-    """Download the MalwareBazaar hash database in a background thread."""
-    update_db_button.config(state="disabled")
-    auth_key = auth_key_var.get().strip()
-    mode = "full database" if auth_key else "recent list (48 hrs, no key required)"
-    av_status_var.set(f"Downloading {mode}...")
-
-    def _run():
-        def _progress(msg):
-            av_status_var.set(msg)
-
-        success, message = update_malware_db(
-            progress_callback=_progress,
-            auth_key=auth_key,
-        )
-
-        if success:
-            import pipeline as pipeline_module
-            pipeline_module.AV_AVAILABLE = True
-            chk_av.config(state="normal")
-            av_var.set(True)
-            av_status_var.set(f"Database ready — {_db_info_string()}")
-            messagebox.showinfo("Database Updated", message)
-        else:
-            av_status_var.set("Database update failed.")
-            messagebox.showerror(
-                "Update Failed",
-                f"{message}\n\n"
-                "If downloading the full database, check that your Auth-Key is correct.\n"
-                "For the recent list (no key), check your internet connection."
-            )
-
-        update_db_button.config(state="normal")
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def _db_info_string():
-    """Return a short string describing the current database file."""
-    if MALWARE_DB_PATH.exists():
-        size_mb = MALWARE_DB_PATH.stat().st_size / (1024 * 1024)
-        mtime   = datetime.fromtimestamp(MALWARE_DB_PATH.stat().st_mtime)
-        return f"updated {mtime.strftime('%Y-%m-%d')}"
-    return "not downloaded"
-
 
 # ==========================
 # PIPELINE
@@ -130,44 +78,58 @@ def run_pipeline():
     try:
         logging.info("Pipeline started.")
 
-        # ---- STEP 1: ANTIVIRUS SCAN ----
+        # ---- STEP 1: WINDOWS DEFENDER SCAN ----
         clean_files = None
 
         if do_av:
             import pipeline as pipeline_module
-            if not pipeline_module.AV_AVAILABLE:
-                status_var.set("Step 1/6 — Malware database not found, skipping scan...")
-                logging.warning("Malware hash database missing. Skipping antivirus scan.")
-            else:
-                status_var.set("Step 1/6 — Scanning files against malware database...")
-                logging.info("Starting antivirus scan.")
 
-                clean_files, infected_files, av_skipped = run_antivirus_scan(
-                    data_dir, out_dir, accession_number
-                )
+            if not pipeline_module.AV_AVAILABLE:
+                status_var.set("Step 1/6 — Windows Defender not available, skipping scan...")
+                logging.warning("Microsoft Defender not available. Skipping antivirus scan.")
+
+                messagebox.showwarning(
+                    "Windows Defender Unavailable",
+                    "Microsoft Defender could not be found on this computer.\n\n"
+                    "The pipeline will continue without an antivirus scan.")
+
+            else:
+                status_var.set("Step 1/6 — Scanning files with Windows Defender...")
+                logging.info("Starting Microsoft Defender antivirus scan.")
+
+                clean_files, infected_files, av_skipped = run_antivirus_scan(data_dir,out_dir,accession_number,)
 
                 if av_skipped:
-                    status_var.set("Step 1/6 — Antivirus scan skipped.")
+                    status_var.set("Step 1/6 — Windows Defender scan skipped.")
+
                     messagebox.showwarning(
                         "Antivirus Scan Skipped",
-                        "The malware database could not be loaded.\n\n"
-                        "Pipeline will continue without antivirus."
-                    )
+                        "Microsoft Defender could not complete the scan.\n\n"
+                        "The pipeline will continue without antivirus verification.")
+
                     clean_files = None
 
                 elif infected_files:
                     infected_list = "\n".join(
-                        f"  {p.name}: {t}" for p, t in infected_files.items()
+                        f"  {p.name}: {t}"
+                        for p, t in infected_files.items()
                     )
+
                     proceed = messagebox.askyesno(
-                        "Infected Files Detected",
-                        f"{len(infected_files)} infected file(s) found and will be EXCLUDED:\n\n"
+                        "Threats Detected",
+                        f"Microsoft Defender flagged "
+                        f"{len(infected_files)} file(s):\n\n"
                         f"{infected_list}\n\n"
-                        "Continue pipeline without these files?"
+                        "Continue the pipeline without these files?"
                     )
+
                     if not proceed:
                         status_var.set("Pipeline cancelled by user.")
+                        logging.warning(
+                            "Pipeline cancelled after Microsoft Defender detected threats."
+                        )
                         return
+
                 else:
                     clean_files = None
 
@@ -278,7 +240,7 @@ def run_pipeline():
         summary_lines = ["Pipeline completed successfully."]
         if infected_files:
             summary_lines.append(
-                f"\n⚠  {len(infected_files)} infected file(s) excluded from ingest."
+                f"\n⚠  {len(infected_files)} Defender-flagged file(s) excluded from ingest."
             )
         if do_bag and BAGIT_AVAILABLE:
             if bag_valid is True:
@@ -350,7 +312,6 @@ av_var           = tk.BooleanVar(value=AV_AVAILABLE)
 bag_var          = tk.BooleanVar(value=True)
 status_var       = tk.StringVar(value="Idle")
 av_status_var    = tk.StringVar()
-auth_key_var     = tk.StringVar()
 
 bag_profile_var   = tk.StringVar(value="aptrust")
 source_org_var    = tk.StringVar()
@@ -394,29 +355,22 @@ chk_move = tk.Checkbutton(root, text="Move files instead of copy", variable=move
 chk_move.grid(row=3, column=1, sticky="w", padx=10, pady=2)
 
 # ---- Antivirus section ----
-av_frame = tk.LabelFrame(root, text="Antivirus — MalwareBazaar Hash Check", padx=8, pady=4)
+av_frame = tk.LabelFrame(root, text="Antivirus — Microsoft Defender", padx=8, pady=4)
 av_frame.grid(row=4, column=0, columnspan=3, sticky="ew", padx=10, pady=3)
 
-chk_av = tk.Checkbutton(av_frame, text="Scan files against malware database",
+chk_av = tk.Checkbutton(av_frame, text="Scan files with Microsoft Defender",
                         variable=av_var,
                         state="normal" if AV_AVAILABLE else "disabled")
 chk_av.grid(row=0, column=0, sticky="w")
 
-update_db_button = tk.Button(av_frame, text="Update Malware Database",
-                             command=do_update_db)
-update_db_button.grid(row=0, column=1, padx=10)
-
-db_info = _db_info_string() if AV_AVAILABLE else "not downloaded"
-av_status_var.set(f"Database: {db_info}" if AV_AVAILABLE else "Database not downloaded yet")
+if AV_AVAILABLE:
+    av_status_var.set("Microsoft Defender available")
+elif DEFENDER_PATH is not None:
+    av_status_var.set("Microsoft Defender installed but not operational")
+else:
+    av_status_var.set("Microsoft Defender not found")
 tk.Label(av_frame, textvariable=av_status_var, fg="gray",
          font=("TkDefaultFont", 8)).grid(row=1, column=0, columnspan=2, sticky="w", padx=4)
-
-tk.Label(av_frame, text="Auth-Key (optional):").grid(row=2, column=0, sticky="e", padx=6, pady=3)
-ent_auth_key = tk.Entry(av_frame, textvariable=auth_key_var, width=36)
-ent_auth_key.grid(row=2, column=1, sticky="w", pady=3)
-tk.Label(av_frame, text="Leave blank for recent list (free). Full database requires a key from bazaar.abuse.ch/api/",
-         fg="gray", font=("TkDefaultFont", 8)
-         ).grid(row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 2))
 
 # BagIt checkbox
 bag_label = ("Create BagIt package" if BAGIT_AVAILABLE
@@ -507,7 +461,7 @@ lockable_inputs = [
     ent_input, btn_input,
     ent_output, btn_output,
     ent_accession,
-    chk_move, chk_av, ent_auth_key, update_db_button, chk_bag,
+    chk_move, chk_av, chk_bag,
     rb_aptrust, rb_generic,
     ent_source_org, ent_contact_name, ent_contact_email,
     ent_title, cmb_access, cmb_storage, ent_desc, chk_tar, chk_validate,

@@ -10,9 +10,9 @@ import shutil
 import os
 import mimetypes
 import tarfile
-import urllib.request
-import gzip
-import io
+import subprocess
+import re
+import json
 import time
 
 # ==========================
@@ -39,147 +39,75 @@ APTRUST_STORAGE_OPTIONS = [
 
 
 # ==========================
-# MALWAREBAZAAR HASH DATABASE
+# MICROSOFT DEFENDER DISCOVERY
 # ==========================
 
-# The database file lives beside this script so it persists between runs.
-MALWARE_DB_PATH = Path(__file__).parent / "malware_hashes.txt"
+def find_defender_executable():
+    """Find the newest installed Defender platform, then standard fallbacks."""
+    if os.name != "nt":
+        return None
 
-# AV is available as long as the database file exists on disk.
-AV_AVAILABLE = MALWARE_DB_PATH.exists()
-
-# Recent list — free, no auth required, ~48 hrs of hashes (~4 MB plain text)
-MALWARE_RECENT_URL = "https://bazaar.abuse.ch/export/txt/md5/recent/"
-
-# Full database — requires a free Auth-Key from bazaar.abuse.ch/api/
-# URL pattern: https://mb-api.abuse.ch/v2/files/exports/<AUTH-KEY>/full.csv
-MALWARE_FULL_URL_TEMPLATE = "https://mb-api.abuse.ch/v2/files/exports/{auth_key}/full.csv"
-
-
-def update_malware_db(progress_callback=None, auth_key=""):
-    """
-    Download the MalwareBazaar MD5 hash list and cache it locally.
-
-    Two modes depending on whether an Auth-Key is provided:
-
-    No auth_key → downloads the recent list (last 48 hours, ~500k hashes).
-                  Free, no account needed.
-                  URL: https://bazaar.abuse.ch/export/txt/md5/recent/
-
-    auth_key    → downloads the full database (all hashes, ~3M+ entries).
-                  Requires a free Auth-Key from bazaar.abuse.ch/api/
-                  URL: https://mb-api.abuse.ch/v2/files/exports/<key>/full.csv
-
-    The recent list is plain text (one MD5 per line, comment lines start with #).
-    The full database is a CSV where the first column is the MD5 hash.
-
-    progress_callback(message: str) — optional; called with status updates.
-    Returns (success: bool, message: str).
-    """
-    import zipfile
-
-    def _report(msg):
-        logging.info(msg)
-        if progress_callback:
-            progress_callback(msg)
-
-    auth_key = auth_key.strip()
-
+    platform = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft" / "Windows Defender" / "Platform"
     try:
-        if auth_key:
-            # Full database download (CSV, may be zipped)
-            url = MALWARE_FULL_URL_TEMPLATE.format(auth_key=auth_key)
-            _report("Connecting to MalwareBazaar (full database)...")
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "ArchivalPipeline/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=180) as response:
-                _report("Downloading full hash database (~50 MB, please wait)...")
-                data = response.read()
+        candidates = sorted(
+            platform.glob("*/MpCmdRun.exe"),
+            key=lambda p: tuple(int(n) for n in re.findall(r"\d+", p.parent.name)),
+            reverse=True,
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    except OSError:
+        logging.exception("Could not inspect Microsoft Defender platform directory.")
 
-            # Response may be a zip or plain CSV depending on endpoint version
-            content_type = ""
-            if hasattr(response, "headers"):
-                content_type = response.headers.get("Content-Type", "")
-
-            if data[:2] == b"PK":  # ZIP magic bytes
-                _report("Extracting database archive...")
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                    csv_name = next(n for n in zf.namelist() if n.endswith(".csv"))
-                    with zf.open(csv_name) as csv_file:
-                        raw_text = csv_file.read().decode("utf-8", errors="replace")
-            else:
-                raw_text = data.decode("utf-8", errors="replace")
-
-            # Extract MD5 column (first field of each non-comment line)
-            _report("Processing database...")
-            hashes = []
-            for line in raw_text.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                md5 = line.split(",")[0].strip().strip('"').lower()
-                if len(md5) == 32:
-                    hashes.append(md5)
-
-            MALWARE_DB_PATH.write_text("\n".join(hashes), encoding="utf-8")
-            count = len(hashes)
-            mode = "full database"
-
-        else:
-            # Recent list — plain text, one MD5 per line
-            _report("Connecting to MalwareBazaar (recent list, last 48 hrs)...")
-            req = urllib.request.Request(
-                MALWARE_RECENT_URL,
-                headers={"User-Agent": "ArchivalPipeline/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=120) as response:
-                _report("Downloading recent hash list...")
-                raw_text = response.read().decode("utf-8", errors="replace")
-
-            hashes = [
-                line.strip().lower()
-                for line in raw_text.splitlines()
-                if line.strip() and not line.startswith("#") and len(line.strip()) == 32
-            ]
-            MALWARE_DB_PATH.write_text("\n".join(hashes), encoding="utf-8")
-            count = len(hashes)
-            mode = "recent list (48 hrs)"
-
-        global AV_AVAILABLE
-        AV_AVAILABLE = True
-
-        msg = f"Database updated: {count:,} hashes ({mode})."
-        _report(msg)
-        return True, msg
-
-    except Exception as exc:
-        msg = f"Failed to update malware database: {exc}"
-        logging.error(msg)
-        return False, msg
-
-
-def load_malware_db():
-    """
-    Load the cached MalwareBazaar hash list into a frozenset of lowercase MD5 strings.
-
-    The file is plain text — one MD5 hex string per line, comment lines start with #.
-    Returns a frozenset, or an empty frozenset if the file cannot be read.
-    """
-    if not MALWARE_DB_PATH.exists():
-        return frozenset()
-
-    hashes = set()
+    fallback = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Windows Defender" / "MpCmdRun.exe"
     try:
-        with open(MALWARE_DB_PATH, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                md5 = line.strip().lower()
-                if md5 and not md5.startswith("#") and len(md5) == 32:
-                    hashes.add(md5)
-    except Exception as exc:
-        logging.error(f"Failed to load malware database: {exc}")
+        if fallback.is_file():
+            return fallback
+        executable = shutil.which("MpCmdRun.exe")
+        if executable:
+            return Path(executable)
+    except OSError:
+        logging.exception("Could not inspect Microsoft Defender fallback locations.")
+    return None
 
-    return frozenset(hashes)
+
+def is_defender_operational():
+    """Check Defender status without scanning or changing security settings."""
+    if os.name != "nt" or DEFENDER_PATH is None:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference = 'Stop'; Get-MpComputerStatus | "
+                "Select-Object AMServiceEnabled, AntivirusEnabled, AMRunningMode | "
+                "ConvertTo-Json -Compress",
+            ],
+            shell=False, capture_output=True, text=True, errors="replace",
+            timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            logging.warning("Could not query Microsoft Defender status: %s", result.stderr.strip())
+            return False
+        status = json.loads(result.stdout)
+        if not isinstance(status, dict):
+            return False
+        mode = status.get("AMRunningMode")
+        return (
+            status.get("AMServiceEnabled") is True
+            and status.get("AntivirusEnabled") is True
+            and isinstance(mode, str)
+            and bool(mode.strip())
+            and mode.strip().casefold() != "not running"
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        logging.warning("Could not query Microsoft Defender status.", exc_info=True)
+        return False
+
+
+DEFENDER_PATH = find_defender_executable()
+AV_AVAILABLE = is_defender_operational()
 
 
 # ==========================
@@ -200,86 +128,128 @@ def compute_md5(file_path, chunk_size=1024 * 1024):
 # ==========================
 
 def run_antivirus_scan(data_directory, output_folder, accession_number):
-    """
-    Scan all files in data_directory by comparing their MD5 checksums against
-    the locally cached MalwareBazaar hash database.
-
-    No external executable is required — the check is pure Python.
-    The database must have been downloaded at least once via update_malware_db().
-
-    Returns:
-        (clean_files, infected_files, av_skipped)
-        clean_files    — set of Path objects whose MD5 was not in the database
-        infected_files — dict of {Path: "MD5 match in MalwareBazaar"}
-        av_skipped     — True if the database file was missing
+    """Scan sequentially with Defender, returning transferable paths, detections,
+    and whether antivirus verification was unavailable. Only detections are
+    excluded; scan errors and cloud placeholders remain transferable.
     """
     data_directory = Path(data_directory)
-    output_folder  = Path(output_folder)
-    all_files      = {p for p in data_directory.rglob("*") if p.is_file()}
-
-    if not AV_AVAILABLE:
-        logging.warning(
-            "Malware hash database not found. Antivirus scan skipped. "
-            "Use 'Update Malware Database' in the GUI to download it."
-        )
+    output_folder = Path(output_folder)
+    all_files = {p for p in data_directory.rglob("*") if p.is_file()}
+    defender_path = DEFENDER_PATH
+    if not AV_AVAILABLE or defender_path is None:
+        if defender_path is None:
+            logging.warning("Microsoft Defender MpCmdRun.exe was not found. Antivirus scan skipped.")
+        else:
+            logging.warning(
+                "Microsoft Defender executable was found, but Defender Antivirus is not operational. "
+                "Antivirus scan skipped."
+            )
         return set(all_files), {}, True
 
-    logging.info(f"Loading malware hash database from: {MALWARE_DB_PATH}")
-    malware_hashes = load_malware_db()
-
-    if not malware_hashes:
-        logging.warning("Malware database loaded but contained no hashes. Scan skipped.")
-        return set(all_files), {}, True
-
-    logging.info(f"Loaded {len(malware_hashes):,} malware hashes. Scanning {len(all_files)} files...")
-
-    av_log_file    = output_folder / f"antivirus_{accession_number}.log"
-    av_csv_file    = output_folder / f"antivirus_{accession_number}.csv"
+    logging.info("Microsoft Defender executable: %s", defender_path)
+    logging.info("Scanning %s files with Microsoft Defender...", len(all_files))
+    cloud_extensions = {".gdoc", ".gsheet", ".gslides", ".gdraw", ".gform", ".gmap", ".gsite"}
+    cloud_message = "Google-native file must be exported/downloaded before content can be antivirus scanned."
     infected_files = {}
-    av_results     = []
+    results = []
+    file_logs = []
+    scanned = 0
+    service_unavailable = 0
 
     for file_path in sorted(all_files):
-        try:
-            md5 = compute_md5(file_path)
-            if md5.lower() in malware_hashes:
-                status = "INFECTED"
-                threat = f"MD5 match in MalwareBazaar ({md5})"
-                infected_files[file_path] = threat
-                logging.warning(f"[INFECTED] {file_path} — {threat}")
-            else:
-                status = "CLEAN"
-                threat = ""
-        except Exception as exc:
-            status = "SCAN_ERROR"
-            threat = str(exc)
-            logging.error(f"[SCAN_ERROR] {file_path} — {exc}")
+        status, threat, return_code = "SCAN_ERROR", "", ""
+        raw_output = None
+        if file_path.suffix.lower() in cloud_extensions:
+            status, threat = "SKIPPED_CLOUD_NATIVE", cloud_message
+        else:
+            try:
+                if not file_path.is_file():
+                    raise FileNotFoundError(f"File disappeared before scan: {file_path}")
+                command = [
+                    str(defender_path), "-Scan", "-ScanType", "3",
+                    "-File", str(file_path.resolve()), "-DisableRemediation",
+                ]
+                completed = subprocess.run(
+                    command, shell=False, capture_output=True, text=True,
+                    errors="replace",
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                scanned += 1
+                return_code = completed.returncode
+                raw_output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+                counts = [0 if n.lower() == "no" else int(n) for n in re.findall(
+                    r"\b(?:found|MpScan\(\)\s+has\s+detected)\s+(\d+|no)\s+threats?\b",
+                    raw_output, re.IGNORECASE,
+                )]
+                # Positive evidence takes precedence over any zero-count line.
+                if any(count > 0 for count in counts):
+                    status = "FLAGGED"
+                    names = re.findall(
+                        r"^\s*(?:threat(?:\s+name)?|signature(?:\s+name)?)\s*[:=]\s*(\S[^\r\n]*)",
+                        raw_output, re.IGNORECASE | re.MULTILINE,
+                    )
+                    threat = "; ".join(dict.fromkeys(name.strip() for name in names)) or "Microsoft Defender detection"
+                    infected_files[file_path] = threat
+                elif counts and return_code == 0:
+                    status = "CLEAN"
+                else:
+                    threat = "Microsoft Defender scan failed or output did not confirm a threat count."
+                    if re.search(
+                        r"0x800106ba|0x80070422|(?:service|Defender)[^\r\n]*(?:unavailable|disabled|not running)",
+                        raw_output, re.IGNORECASE,
+                    ):
+                        service_unavailable += 1
+            except (OSError, subprocess.SubprocessError) as exc:
+                threat = str(exc)
+                logging.exception("Microsoft Defender scan could not run for %s", file_path)
 
-        av_results.append({
-            "file_path": str(file_path),
-            "status":    status,
-            "threat":    threat,
+        results.append({
+            "file_path": str(file_path), "status": status,
+            "threat": threat, "return_code": return_code,
         })
-        logging.info(f"[AV:{status}] {file_path}")
+        log_result = f"[{status}] {file_path}\n"
+        if threat:
+            log_result += f"{threat}\n"
+        if raw_output is not None:
+            log_result += f"Return code: {return_code}\n--- Defender output ---\n{raw_output}\n--- End Defender output ---\n"
+        file_logs.append(log_result)
+        log = logging.error if status == "SCAN_ERROR" else logging.warning if status == "FLAGGED" else logging.info
+        log("[AV:%s] %s %s", status, file_path, threat)
 
-    with open(av_csv_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["file_path", "status", "threat"])
-        writer.writeheader()
-        writer.writerows(av_results)
-
-    with open(av_log_file, "w", encoding="utf-8") as f:
-        f.write(f"--- MalwareBazaar Hash Scan: {datetime.now().isoformat()} ---\n")
-        f.write(f"Database: {MALWARE_DB_PATH}\n")
-        f.write(f"Hashes loaded: {len(malware_hashes):,}\n")
-        f.write(f"Files scanned: {len(all_files)}\n")
-        f.write(f"Infected:      {len(infected_files)}\n\n")
-        for r in av_results:
-            f.write(f"[{r['status']}] {r['file_path']}")
-            if r["threat"]:
-                f.write(f"\n        {r['threat']}")
-            f.write("\n")
+    counts = Counter(result["status"] for result in results)
+    header = (
+        f"--- Microsoft Defender Scan: {datetime.now().isoformat()} ---\n"
+        f"Defender executable: {defender_path}\nScan root: {data_directory}\n"
+        f"Files discovered: {len(all_files)}\nFiles scanned: {scanned}\n"
+        f"Files flagged: {len(infected_files)}\nScan errors: {counts['SCAN_ERROR']}\n"
+        f"Google-native placeholders skipped: {counts['SKIPPED_CLOUD_NATIVE']}\n\n"
+    )
+    av_csv_file = output_folder / f"antivirus_{accession_number}.csv"
+    av_log_file = output_folder / f"antivirus_{accession_number}.log"
+    try:
+        output_folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logging.exception("Could not create antivirus report directory: %s", output_folder)
+    try:
+        with open(av_csv_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["file_path", "status", "threat", "return_code"])
+            writer.writeheader()
+            writer.writerows(results)
+    except OSError:
+        logging.exception("Could not write Microsoft Defender CSV: %s", av_csv_file)
+    try:
+        av_log_file.write_text(header + "\n".join(file_logs), encoding="utf-8")
+    except OSError:
+        logging.exception("Could not write Microsoft Defender log: %s", av_log_file)
+        # Preserve the scan evidence in the pipeline log if the AV log fails.
+        logging.error("%s%s", header, "\n".join(file_logs))
 
     clean_files = all_files - set(infected_files.keys())
-    return clean_files, infected_files, False
+    scan_candidates = len(all_files) - counts["SKIPPED_CLOUD_NATIVE"]
+    av_skipped = scan_candidates > 0 and (scanned == 0 or service_unavailable == scanned)
+    if av_skipped:
+        logging.warning("Microsoft Defender verification unavailable. Pipeline will continue without antivirus scanning.")
+    return clean_files, infected_files, av_skipped
 
 
 # ==========================
