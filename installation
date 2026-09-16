@@ -30,6 +30,18 @@ The Pipeline still transfers files and builds XML in Python. FITS supplies
 optional identification metadata; DataAccessioner itself is not launched.
 Nothing downloads or installs FITS automatically.
 
+The repository includes FITS 1.6.0 at tools/fits-1.6.0. Keep that directory
+inside the tools folder next to pipeline.py, as supplied by the repository. With Java
+available, launch the GUI normally; FITS_HOME is not required. Discovery is
+relative to pipeline.py, so launching from another working directory also works.
+Java is still a separate prerequisite; it is not bundled.
+
+For a complete repository checkout, follow step 1 below, then run `py GUI.py`.
+Steps 2-4 describe an optional external FITS installation/override. To run the
+direct diagnostic commands in steps 5-6 against the bundled copy, first set
+`$env:FITS_HOME = (Resolve-Path .\tools\fits-1.6.0).Path` from the repository.
+This variable is for those diagnostic commands, not required by normal GUI runs.
+
 Windows setup
 
 1. Check Java in PowerShell:
@@ -139,9 +151,12 @@ Windows setup
 
 Configuration and log reference
 
-- Precedence: Python fits_home argument, then FITS_HOME, then fits.bat (Windows)
-  or fits.sh (other systems) found on PATH. No recursive directory discovery.
+- Precedence: Python fits_home argument, then FITS_HOME, then tools/fits-1.6.0
+  relative to pipeline.py, then fits.bat (Windows) or fits.sh (other systems)
+  found on PATH. No recursive directory discovery.
   An invalid explicit path is reported instead of silently using another install.
+  An existing bundled directory with missing launcher/libraries also produces a
+  nonfatal configuration warning rather than silently switching installations.
 - The Pipeline checks <FITS_HOME>\fits.bat (or fits.sh) as a distribution marker,
   checks lib/*.jar, and runs Java -version once per accession. It then invokes
   Java with classpath <FITS_HOME>/lib/* and edu.harvard.hul.ois.fits.Fits directly,

@@ -272,10 +272,14 @@ def configure_fits(fits_home=None):
     configured = fits_home or os.environ.get("FITS_HOME", "").strip()
     try:
         if not configured:
+            bundled = Path(__file__).resolve().parent / "tools" / "fits-1.6.0"
+            if bundled.is_dir():
+                configured = bundled
+        if not configured:
             launcher_on_path = shutil.which(launcher_name)
             if not launcher_on_path:
                 unavailable("NOT_CONFIGURED", "Set FITS_HOME to the extracted FITS directory, "
-                            "or add its launcher directory to PATH.")
+                            "restore tools/fits-1.6.0, or add its launcher directory to PATH.")
                 return None
             configured = Path(launcher_on_path).parent
         home = Path(configured).expanduser().resolve()

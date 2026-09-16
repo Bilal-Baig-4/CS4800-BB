@@ -119,7 +119,9 @@ class PremisTests(unittest.TestCase):
 
     def test_missing_fits_preserves_move_and_filter(self):
         (self.source / "excluded.txt").write_text("excluded")
-        with patch.dict(os.environ, {"FITS_HOME": ""}), patch.object(pipeline.shutil, "which", return_value=None):
+        with patch.dict(os.environ, {"FITS_HOME": ""}), \
+             patch.object(pipeline, "__file__", str(self.base / "pipeline.py")), \
+             patch.object(pipeline.shutil, "which", return_value=None):
             tree, html, rows = self.reports(move_files=True, clean_files_only={self.file})
         self.assertFalse(self.file.exists())
         self.assertFalse((self.output / "A/excluded.txt").exists())
@@ -235,6 +237,55 @@ class FitsConfigurationTests(unittest.TestCase):
         env = patch.dict(os.environ, {"FITS_HOME": "", "JAVA_HOME": ""})
         env.start()
         self.addCleanup(env.stop)
+        module_path = patch.object(pipeline, "__file__", str(self.home / "pipeline.py"))
+        module_path.start()
+        self.addCleanup(module_path.stop)
+
+    def make_bundle(self):
+        bundled = self.home / "tools/fits-1.6.0"
+        (bundled / "lib").mkdir(parents=True)
+        (bundled / self.launcher.name).touch()
+        (bundled / "lib/fits.jar").touch()
+        return bundled
+
+    def test_bundled_discovery_is_relative_to_module_not_working_directory(self):
+        bundled = self.make_bundle()
+        previous = Path.cwd()
+        try:
+            os.chdir(self.home / "lib")
+            with patch.object(pipeline.shutil, "which", return_value="java") as which, \
+                 patch.object(pipeline.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "Java 17")):
+                self.assertEqual(pipeline.configure_fits(), (bundled.resolve(), "java"))
+            which.assert_called_once_with("java")  # never asks PATH for FITS
+        finally:
+            os.chdir(previous)
+
+    def test_explicit_and_environment_override_bundle(self):
+        self.make_bundle()
+        for explicit in (True, False):
+            with self.subTest(explicit=explicit), \
+                 patch.dict(os.environ, {"FITS_HOME": str(self.home / "invalid") if explicit else str(self.home)}), \
+                 patch.object(pipeline.shutil, "which", return_value="java") as which, \
+                 patch.object(pipeline.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "Java 17")):
+                self.assertEqual(pipeline.configure_fits(self.home if explicit else None), (self.home.resolve(), "java"))
+                which.assert_called_once_with("java")
+
+    def test_invalid_bundle_is_nonfatal_and_not_silently_replaced(self):
+        # A directory exists but its launcher is missing: report it, do not use PATH.
+        (self.home / "tools/fits-1.6.0").mkdir(parents=True)
+        source = self.home / "source"
+        source.mkdir()
+        (source / "sample.pdf").write_bytes(pdf_bytes())
+        with patch.object(pipeline.shutil, "which", return_value=str(self.launcher)) as which, \
+             patch.object(pipeline, "identify_with_fits") as identify:
+            with self.assertLogs(level="WARNING") as logs:
+                manifest = pipeline.generate_data_accessioner_xml(source, self.home / "out", "A")
+        which.assert_not_called()
+        identify.assert_not_called()
+        self.assertIn("FITS:LAUNCHER_MISSING", logs.output[0])
+        self.assertEqual(len(logs.output), 1)
+        self.assertIsNotNone(ET.parse(str(manifest)).find(".//p:fixity", NS))
+        self.assertEqual((self.home / "out/A/sample.pdf").read_bytes(), pdf_bytes())
 
     def test_configuration_failures(self):
         cases = [(None, "NOT_CONFIGURED"), (self.home / "missing", "INVALID_HOME"),

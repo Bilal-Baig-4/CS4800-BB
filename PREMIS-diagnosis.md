@@ -100,8 +100,8 @@ Representative generator change:
 git diff --check
 ```
 
-All 15 automated tests passed with FITS 1.6.0 and Java 23.0.2, including the
-opt-in live test (zero skips). Without live FITS configured, 14 tests pass and
+All 18 automated tests passed with FITS 1.6.0 and Java 23.0.2, including the
+opt-in live test (zero skips). Without live FITS configured, 17 tests pass and
 the live test skips. The initial sandboxed test attempt could not access Windows
 temp directories; the same command passed outside the sandbox.
 
@@ -171,8 +171,9 @@ FITS_HOME. The bounded machine check found working Java 23.0.2 on PATH, with
 JAVA_HOME unset, and no FITS launcher in the repository or checked common tool,
 Downloads, Documents, and Desktop locations. This is not a full-disk inventory.
 
-`configure_fits` now validates the explicit fits_home argument or FITS_HOME once
-per accession, falling back only to a launcher on PATH when neither is set.
+`configure_fits` validates the explicit fits_home argument or FITS_HOME once
+per accession, then checks tools/fits-1.6.0 relative to pipeline.py, then a
+launcher on PATH when no bundled directory exists.
 It checks the platform launcher, library JARs, and Java execution. The launcher
 is a distribution marker; the existing direct Java FITS invocation is retained.
 Global setup failures log once and skip identification for the accession.
@@ -195,3 +196,14 @@ Repeating the GUI's generator call with FITS_HOME set in the launching shell
 identified all 42 files, including the previously timed-out file. Persisting
 FITS_HOME requires restarting parent applications such as VS Code; a variable
 set in a separate shell is not inherited by an already-running GUI.
+
+Bundled FITS support now removes that configuration requirement for complete
+repository checkouts. Explicit fits_home and FITS_HOME still override the bundle.
+Java remains required. Discovery is independent of the working directory;
+invalid bundled installations remain nonfatal and are reported using the same
+validation as external installations. Tests isolate discovery from the actual
+repository bundle and exercise overrides, PATH fallback and missing launchers.
+A real copy-mode accession with both FITS_HOME and PIPELINE_TEST_FITS_HOME unset
+selected the repository bundle, identified the sample PDF as PDF 1.2 / fmt/16,
+and preserved that PUID in XML, HTML and CSV. Its fixity check passed, and the
+run logged READY and IDENTIFIED without warnings. No GUI changes were needed.
