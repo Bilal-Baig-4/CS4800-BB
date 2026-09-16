@@ -48,27 +48,27 @@
 
       <!-- file format -->
       <xsl:text>"</xsl:text>
-      <xsl:value-of select="premis:object/premis:objectCharacteristics/premis:format/premis:formatDesignation/premis:formatName"/>
+      <xsl:call-template name="metadata-values"><xsl:with-param name="nodes" select="premis:object/premis:objectCharacteristics/premis:format/premis:formatDesignation/premis:formatName"/></xsl:call-template>
       <xsl:text>",</xsl:text>
 
       <!-- format version -->
       <xsl:text>"</xsl:text>
-      <xsl:value-of select="premis:object/premis:objectCharacteristics/premis:format/premis:formatDesignation/premis:formatVersion"/>
+      <xsl:call-template name="metadata-values"><xsl:with-param name="nodes" select="premis:object/premis:objectCharacteristics/premis:format/premis:formatDesignation/premis:formatVersion"/></xsl:call-template>
       <xsl:text>",</xsl:text>
 
       <!-- format registry key/PUID -->
       <xsl:text>"</xsl:text>
-      <xsl:value-of select="premis:object/premis:objectCharacteristics/premis:format/premis:formatRegistry/premis:formatRegistryKey"/>
+      <xsl:call-template name="metadata-values"><xsl:with-param name="nodes" select="premis:object/premis:objectCharacteristics/premis:format/premis:formatRegistry/premis:formatRegistryKey"/></xsl:call-template>
       <xsl:text>",</xsl:text>
 
       <!-- Identified by -->
       <xsl:text>"</xsl:text>
-      <xsl:value-of select="substring(premis:object/premis:objectCharacteristics/premis:format/premis:formatNote[starts-with(text(), 'Identified by:')][1], 16)"/>
+      <xsl:call-template name="metadata-values"><xsl:with-param name="nodes" select="premis:object/premis:objectCharacteristics/premis:format/premis:formatNote[starts-with(text(), 'Identified by:')]"/><xsl:with-param name="start" select="16"/></xsl:call-template>
       <xsl:text>",</xsl:text>
 
       <!-- MIME Type -->
       <xsl:text>"</xsl:text>
-      <xsl:value-of select="translate(premis:object/premis:objectCharacteristics/premis:format/premis:formatNote[1], ',', '')"/>
+      <xsl:call-template name="metadata-values"><xsl:with-param name="nodes" select="premis:object/premis:objectCharacteristics/premis:format/premis:formatNote[1]"/></xsl:call-template>
       <xsl:text>",</xsl:text>
 
       <!-- ID Warning -->
@@ -87,6 +87,29 @@
   </xsl:template>
 
   <!-- Get file extension -->
+  <!-- Preserve all reported identities/tools and escape quotes in CSV fields. -->
+  <xsl:template name="metadata-values">
+    <xsl:param name="nodes"/>
+    <xsl:param name="start" select="1"/>
+    <xsl:for-each select="$nodes">
+      <xsl:if test="position() != 1"><xsl:text> | </xsl:text></xsl:if>
+      <xsl:call-template name="csv-escape">
+        <xsl:with-param name="value" select="substring(., $start)"/>
+      </xsl:call-template>
+    </xsl:for-each>
+  </xsl:template>
+  <xsl:template name="csv-escape">
+    <xsl:param name="value"/>
+    <xsl:choose>
+      <xsl:when test="contains($value, '&quot;')">
+        <xsl:value-of select="substring-before($value, '&quot;')"/>
+        <xsl:text>""</xsl:text>
+        <xsl:call-template name="csv-escape"><xsl:with-param name="value" select="substring-after($value, '&quot;')"/></xsl:call-template>
+      </xsl:when>
+      <xsl:otherwise><xsl:value-of select="$value"/></xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
   <xsl:template name="get-file-extension">
     <xsl:param name="path"/>
     <xsl:choose>

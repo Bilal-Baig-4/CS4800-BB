@@ -14,6 +14,8 @@ import subprocess
 import re
 import json
 import time
+import tempfile
+from copy import deepcopy
 
 # ==========================
 # OPTIONAL DEPENDENCIES
@@ -256,11 +258,143 @@ def run_antivirus_scan(data_directory, output_folder, accession_number):
 # DATA ACCESSIONER
 # ==========================
 
+PREMIS_NS = "info:lc/xmlns/premis-v2"
+FITS_NS = "http://hul.harvard.edu/ois/xml/ns/fits/fits_output"
+
+
+def configure_fits(fits_home=None):
+    """Validate once per accession. Return (home, java), or None to skip FITS."""
+    def unavailable(code, detail):
+        logging.warning("[FITS:%s] %s Format identification skipped for this accession; "
+                        "transfer, UUID, MD5 and size continue. See installation for setup.", code, detail)
+
+    launcher_name = "fits.bat" if os.name == "nt" else "fits.sh"
+    configured = fits_home or os.environ.get("FITS_HOME", "").strip()
+    try:
+        if not configured:
+            launcher_on_path = shutil.which(launcher_name)
+            if not launcher_on_path:
+                unavailable("NOT_CONFIGURED", "Set FITS_HOME to the extracted FITS directory, "
+                            "or add its launcher directory to PATH.")
+                return None
+            configured = Path(launcher_on_path).parent
+        home = Path(configured).expanduser().resolve()
+        if not home.is_dir():
+            unavailable("INVALID_HOME", f"FITS directory does not exist: {home}")
+            return None
+        launcher = home / launcher_name
+        if not launcher.is_file():
+            unavailable("LAUNCHER_MISSING", f"Expected {launcher}. Select the extracted distribution root.")
+            return None
+        if not any((home / "lib").glob("*.jar")):
+            unavailable("LIBRARIES_MISSING", f"No library JARs in {home / 'lib'}. Install the release ZIP, not source code.")
+            return None
+        java_home = os.environ.get("JAVA_HOME")
+        java = (str(Path(java_home) / "bin" / ("java.exe" if os.name == "nt" else "java"))
+                if java_home else shutil.which("java"))
+        if not java:
+            unavailable("JAVA_UNAVAILABLE", "Java is not on PATH and JAVA_HOME is unset.")
+            return None
+        try:
+            version = subprocess.run(
+                [java, "-version"], shell=False, check=True, capture_output=True,
+                text=True, errors="replace", timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            unavailable("JAVA_UNAVAILABLE", f"Cannot run Java at {java}: {exc}. Check JAVA_HOME/PATH.")
+            return None
+        logging.info("[FITS:READY] Directory=%s; launcher=%s; Java=%s; %s. "
+                     "Pipeline invokes the Java entry point directly.",
+                     home, launcher, java, (version.stderr or version.stdout).strip())
+        return home, java
+    except (OSError, ValueError) as exc:
+        unavailable("INVALID_HOME", f"Cannot inspect FITS configuration: {exc}")
+        return None
+
+
+def identify_with_fits(file_path, fits_home, java=None):
+    """Run the FITS Java entry point without a shell; return its complete XML."""
+    fits_home = Path(fits_home).resolve()
+    java_home = os.environ.get("JAVA_HOME")
+    java = java or (str(Path(java_home) / "bin" / ("java.exe" if os.name == "nt" else "java")) if java_home else "java")
+    with tempfile.TemporaryDirectory(prefix="pipeline-fits-") as temp_dir:
+        report = Path(temp_dir) / "fits.xml"
+        environment = os.environ.copy()
+        environment["FITS_HOME"] = str(fits_home)
+        subprocess.run(
+            [java, "-classpath", str(fits_home / "lib" / "*"),
+             "edu.harvard.hul.ois.fits.Fits", "-i", str(Path(file_path).resolve()),
+             "-o", str(report)],
+            cwd=str(fits_home), env=environment, shell=False, check=True,
+            capture_output=True, text=True, errors="replace", timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        root = LET.parse(str(report), LET.XMLParser(resolve_entities=False, no_network=True)).getroot()
+        if root.tag != f"{{{FITS_NS}}}fits":
+            raise ValueError("FITS returned an unexpected XML root")
+        return root
+
+
+def add_object_characteristics(premis_obj, checksum, size, fits_result=None):
+    """Map FITS identities using DataAccessioner's PREMIS v2 conventions.
+
+    Preserve the complete FITS report in an extension, including unmapped
+    technical metadata, conflicts, tool output and identification warnings.
+    """
+    def element(parent, name, value=None):
+        child = LET.SubElement(parent, f"{{{PREMIS_NS}}}{name}")
+        child.text = value
+        return child
+
+    characteristics = element(premis_obj, "objectCharacteristics")
+    element(characteristics, "compositionLevel", "0")
+    fixity = element(characteristics, "fixity")
+    element(fixity, "messageDigestAlgorithm", "MD5")
+    element(fixity, "messageDigest", checksum)
+    element(fixity, "messageDigestOriginator", "Pipeline (Python hashlib)")
+    element(characteristics, "size", str(size))
+    if fits_result is None:
+        return
+
+    ns = {"f": FITS_NS}
+    for identity in fits_result.findall("f:identification/f:identity", ns):
+        name = identity.get("format", "").strip()
+        mime = identity.get("mimetype", "").strip()
+        if (name.casefold() in ("", "unknown", "unknown binary")
+                and mime in ("", "application/octet-stream")
+                and not identity.findall("f:externalIdentifier", ns)):
+            continue
+        fmt = element(characteristics, "format")
+        designation = element(fmt, "formatDesignation")
+        element(designation, "formatName", identity.get("format", ""))
+        versions = identity.findall("f:version", ns)
+        if versions:
+            element(designation, "formatVersion", " | ".join(v.text or "" for v in versions))
+        for identifier in identity.findall("f:externalIdentifier", ns):
+            key = (identifier.text or "").strip()
+            if (identifier.get("type", "").casefold() == "puid"
+                    or identifier.get("toolname", "").casefold() == "droid") and re.fullmatch(r"(?:x-)?fmt/\d+", key):
+                registry = element(fmt, "formatRegistry")
+                element(registry, "formatRegistryName", "http://www.nationalarchives.gov.uk/pronom")
+                element(registry, "formatRegistryKey", key)
+        # DataAccessioner places the MIME type in the first formatNote.
+        element(fmt, "formatNote", identity.get("mimetype", ""))
+        for tool in identity.findall("f:tool", ns):
+            name = tool.get("toolname", "")
+            version = tool.get("toolversion")
+            element(fmt, "formatNote", f"Identified by: {name}" + (f" v{version}" if version else ""))
+    extension = element(characteristics, "objectCharacteristicsExtension")
+    extension.append(deepcopy(fits_result))
+
+
 def generate_data_accessioner_xml(data_directory, output_folder, accession_number,
-                                  move_files=False, clean_files_only=None):
+                                  move_files=False, clean_files_only=None, fits_home=None):
     """
     Copy (or move) files into the accession folder and produce a
-    Data Accessioner-compatible XML manifest with PREMIS object identifiers.
+    Data Accessioner-compatible XML manifest with PREMIS technical metadata.
+    This is a Python implementation, not an invocation of DataAccessioner.
+    fits_home (or FITS_HOME) enables content identification using installed FITS.
 
     clean_files_only — if provided, only files in this set are transferred;
                        others are logged as skipped (infected).
@@ -269,6 +403,7 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
     output_folder   = Path(output_folder)
     accession_folder = output_folder / accession_number
     accession_folder.mkdir(parents=True, exist_ok=True)
+    fits_config = configure_fits(fits_home)
 
     dir_times = {}
 
@@ -316,6 +451,24 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
         os.utime(dest_path, (atime, mtime))
 
         checksum = compute_md5(dest_path)
+        fits_result = None
+        if fits_config:
+            try:
+                fits_result = identify_with_fits(dest_path, *fits_config)
+            except subprocess.TimeoutExpired:
+                logging.warning("[FITS:TIMEOUT] %s exceeded 300 seconds; format metadata omitted.", dest_path)
+            except subprocess.CalledProcessError as exc:
+                logging.warning("[FITS:EXIT_ERROR] %s; exit code %s; %s", dest_path, exc.returncode,
+                                (exc.stderr or exc.stdout or "No diagnostic output")[-2000:])
+            except (LET.XMLSyntaxError, ValueError) as exc:
+                logging.warning("[FITS:INVALID_XML] %s: %s", dest_path, exc)
+            except (OSError, subprocess.SubprocessError) as exc:
+                logging.warning("[FITS:EXECUTION_ERROR] %s: %s", dest_path, exc)
+            finally:
+                try:
+                    os.utime(dest_path, (atime, mtime))
+                except OSError as exc:
+                    logging.warning("Could not restore timestamps after FITS for %s: %s", dest_path, exc)
 
         file_el = LET.SubElement(
             accession_el, "file",
@@ -336,6 +489,16 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
         LET.SubElement(
             premis_id, "{info:lc/xmlns/premis-v2}objectIdentifierValue"
         ).text = str(uuid.uuid4())
+        add_object_characteristics(premis_obj, checksum, dest_path.stat().st_size, fits_result)
+        if fits_result is not None:
+            formats = premis_obj.findall(f"{{{PREMIS_NS}}}objectCharacteristics/{{{PREMIS_NS}}}format")
+            puids = premis_obj.findall(f".//{{{PREMIS_NS}}}formatRegistryKey")
+            if formats:
+                logging.info("[FITS:IDENTIFIED] %s; %d format(s); PUIDs: %s", dest_path,
+                             len(formats), ", ".join(p.text for p in puids) or "none reported")
+            else:
+                logging.info("[FITS:NO_IDENTIFICATION] %s; FITS completed but returned no useful "
+                             "format identification. Raw FITS XML retained.", dest_path)
 
     xml_output_file = output_folder / f"{accession_number}.xml"
     LET.ElementTree(collection_el).write(

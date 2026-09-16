@@ -174,6 +174,7 @@
                                     <td>
                                         <xsl:value-of
                                             select="premis:formatDesignation/premis:formatName"/>
+                                        <xsl:text> </xsl:text>
                                         <xsl:value-of
                                             select="premis:formatDesignation/premis:formatVersion"/>
                                     </td>
@@ -203,14 +204,14 @@
                                     select="substring(premis:formatNote[starts-with(text(), 'DROID Identification Warning:')], 30)"/></td>
                             </tr>
                         </xsl:if>
-                        <xsl:if test="premis:formatRegistry/premis:formatRegistryKey">
+                        <xsl:for-each select="premis:formatRegistry[premis:formatRegistryKey]">
                             <tr>
                                 <th>PUID/Registry</th>
                                 <td><xsl:value-of
-                                    select="premis:formatRegistry/premis:formatRegistryKey"/> (<xsl:value-of
-                                        select="premis:formatRegistry/premis:formatRegistryName"/>)</td>
+                                    select="premis:formatRegistryKey"/> (<xsl:value-of
+                                        select="premis:formatRegistryName"/>)</td>
                             </tr>
-                        </xsl:if>
+                        </xsl:for-each>
                         <xsl:if test="premis:formatNote[1]">
                             <tr>
                                 <th>MIME Type</th>
