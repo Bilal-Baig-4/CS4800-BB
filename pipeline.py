@@ -5,7 +5,8 @@ from lxml import etree as LET
 import uuid
 import logging
 import csv
-from collections import Counter
+from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import os
 import mimetypes
@@ -393,12 +394,16 @@ def add_object_characteristics(premis_obj, checksum, size, fits_result=None):
 
 
 def generate_data_accessioner_xml(data_directory, output_folder, accession_number,
-                                  move_files=False, clean_files_only=None, fits_home=None):
+                                  move_files=False, clean_files_only=None, fits_home=None,
+                                  fits_workers=2, progress_callback=None):
     """
     Copy (or move) files into the accession folder and produce a
     Data Accessioner-compatible XML manifest with PREMIS technical metadata.
     This is a Python implementation, not an invocation of DataAccessioner.
     fits_home (or FITS_HOME) enables content identification using installed FITS.
+    fits_workers is 1 (sequential) or 2 (default). Only identification overlaps;
+    transfers, XML assembly and logging retain input order. progress_callback
+    receives (current_file_number, total_files, relative_path) before waiting.
 
     clean_files_only — if provided, only files in this set are transferred;
                        others are logged as skipped (infected).
@@ -422,43 +427,25 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
         f"Transferred on {datetime.now().isoformat()}"
     )
 
-    for file_path in data_directory.rglob("*"):
+    if fits_workers not in (1, 2):
+        raise ValueError("fits_workers must be 1 or 2")
+    total_files = (sum(1 for p in data_directory.rglob("*")
+                       if p.is_file() and (clean_files_only is None or p in clean_files_only))
+                   if progress_callback is not None else 0)
+    completed = 0
 
-        # Record directory timestamps so we can restore them after copying
-        if file_path.is_dir():
-            stat = file_path.stat()
-            rel  = file_path.relative_to(data_directory)
-            dir_times[rel] = (stat.st_atime, stat.st_mtime)
-
-        if not file_path.is_file():
-            continue
-
-        # Skip infected files when a filter is active
-        if clean_files_only is not None and file_path not in clean_files_only:
-            logging.warning(f"[SKIPPED — INFECTED] {file_path}")
-            continue
-
-        stat_src = file_path.stat()
-        atime    = stat_src.st_atime
-        mtime    = stat_src.st_mtime
-
-        rel_path  = file_path.relative_to(data_directory)
-        dest_path = accession_folder / rel_path
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if move_files:
-            shutil.move(str(file_path), str(dest_path))
-        else:
-            shutil.copy2(str(file_path), str(dest_path))
-
-        # Restore original timestamps explicitly after copy
-        os.utime(dest_path, (atime, mtime))
-
-        checksum = compute_md5(dest_path)
-        fits_result = None
-        if fits_config:
+    def report_progress(relative_path):
+        if progress_callback is not None:
             try:
-                fits_result = identify_with_fits(dest_path, *fits_config)
+                progress_callback(completed + 1, total_files, relative_path.as_posix())
+            except Exception:
+                logging.warning("Could not update accession progress.", exc_info=True)
+
+    def finish_file(dest_path, rel_path, checksum, atime, mtime, future):
+        fits_result = None
+        if future is not None:
+            try:
+                fits_result = future.result()
             except subprocess.TimeoutExpired:
                 logging.warning("[FITS:TIMEOUT] %s exceeded 300 seconds; format metadata omitted.", dest_path)
             except subprocess.CalledProcessError as exc:
@@ -503,6 +490,58 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
             else:
                 logging.info("[FITS:NO_IDENTIFICATION] %s; FITS completed but returned no useful "
                              "format identification. Raw FITS XML retained.", dest_path)
+
+    pending = deque()
+    with ThreadPoolExecutor(max_workers=fits_workers) as executor:
+        for file_path in data_directory.rglob("*"):
+
+            # Record directory timestamps so we can restore them after copying
+            if file_path.is_dir():
+                stat = file_path.stat()
+                rel  = file_path.relative_to(data_directory)
+                dir_times[rel] = (stat.st_atime, stat.st_mtime)
+
+            if not file_path.is_file():
+                continue
+
+            # Skip infected files when a filter is active
+            if clean_files_only is not None and file_path not in clean_files_only:
+                logging.warning(f"[SKIPPED — INFECTED] {file_path}")
+                continue
+
+            stat_src = file_path.stat()
+            atime    = stat_src.st_atime
+            mtime    = stat_src.st_mtime
+
+            rel_path  = file_path.relative_to(data_directory)
+            dest_path = accession_folder / rel_path
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if move_files:
+                shutil.move(str(file_path), str(dest_path))
+            else:
+                shutil.copy2(str(file_path), str(dest_path))
+
+            # Restore original timestamps explicitly after copy
+            os.utime(dest_path, (atime, mtime))
+
+            checksum = compute_md5(dest_path)
+            if fits_config:
+                future = executor.submit(identify_with_fits, dest_path, *fits_config)
+            else:
+                future = None
+            pending.append((dest_path, rel_path, checksum, atime, mtime, future))
+            if len(pending) >= (fits_workers if fits_config else 1):
+                item = pending.popleft()
+                report_progress(item[1])
+                finish_file(*item)
+                completed += 1
+
+        while pending:
+            item = pending.popleft()
+            report_progress(item[1])
+            finish_file(*item)
+            completed += 1
 
     xml_output_file = output_folder / f"{accession_number}.xml"
     LET.ElementTree(collection_el).write(

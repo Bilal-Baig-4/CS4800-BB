@@ -136,12 +136,16 @@ def run_pipeline():
         logging.info("Antivirus step complete.")
 
         # ---- STEP 2: DATA ACCESSIONER ----
-        status_var.set("Step 2/6 — Copying files and building XML manifest...")
+        status_var.set("Step 2/6 — Copying files and identifying formats...")
         logging.info("Starting Data Accessioner.")
 
         xml_report = generate_data_accessioner_xml(
             data_dir, out_dir, accession_number, move_files,
             clean_files_only=clean_files if infected_files else None,
+            progress_callback=lambda current, total, name: root.after(
+                0, status_var.set,
+                f"Step 2/6 — Copying/identifying {current}/{total}: {name}",
+            ),
         )
         logging.info("Data Accessioner complete.")
 
@@ -467,7 +471,7 @@ lockable_inputs = [
     ent_title, cmb_access, cmb_storage, ent_desc, chk_tar, chk_validate,
 ]
 
-if not BAGIT_AVAILABLE:
+if not BAGIT_AVAILABLE:  
     bag_frame.grid_remove()
 else:
     toggle_bag_fields()
