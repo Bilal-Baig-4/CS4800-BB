@@ -1,5 +1,8 @@
 # FITS performance investigation
 
+This records the historical full-FITS benchmark. The Pipeline now uses a
+separate DROID-only profile; see [current measurements and configuration](FITS-droid-only.md).
+
 Measured on Windows, 2026-09-22, using bundled FITS 1.6.0 and Java 23.0.2,
 16 logical processors and 16 GiB RAM. The 2005 collection contains 42 files.
 All runs used fresh output folders and COPY mode through

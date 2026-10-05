@@ -261,6 +261,7 @@ def run_antivirus_scan(data_directory, output_folder, accession_number):
 
 PREMIS_NS = "info:lc/xmlns/premis-v2"
 FITS_NS = "http://hul.harvard.edu/ois/xml/ns/fits/fits_output"
+FITS_PROFILE = Path(__file__).resolve().parent / "config" / "fits-droid.xml"
 
 
 def configure_fits(fits_home=None):
@@ -310,7 +311,7 @@ def configure_fits(fits_home=None):
             unavailable("JAVA_UNAVAILABLE", f"Cannot run Java at {java}: {exc}. Check JAVA_HOME/PATH.")
             return None
         logging.info("[FITS:READY] Directory=%s; launcher=%s; Java=%s; %s. "
-                     "Pipeline invokes the Java entry point directly.",
+                     "Pipeline invokes the Java entry point directly with the DROID-only profile.",
                      home, launcher, java, (version.stderr or version.stdout).strip())
         return home, java
     except (OSError, ValueError) as exc:
@@ -319,7 +320,9 @@ def configure_fits(fits_home=None):
 
 
 def identify_with_fits(file_path, fits_home, java=None):
-    """Run the FITS Java entry point without a shell; return its complete XML."""
+    """Run FITS with the Pipeline DROID-only profile; return its complete XML."""
+    if not FITS_PROFILE.is_file():
+        raise FileNotFoundError(f"Pipeline FITS profile missing: {FITS_PROFILE}")
     fits_home = Path(fits_home).resolve()
     java_home = os.environ.get("JAVA_HOME")
     java = java or (str(Path(java_home) / "bin" / ("java.exe" if os.name == "nt" else "java")) if java_home else "java")
@@ -329,7 +332,8 @@ def identify_with_fits(file_path, fits_home, java=None):
         environment["FITS_HOME"] = str(fits_home)
         subprocess.run(
             [java, "-classpath", str(fits_home / "lib" / "*"),
-             "edu.harvard.hul.ois.fits.Fits", "-i", str(Path(file_path).resolve()),
+             "edu.harvard.hul.ois.fits.Fits", "-f", str(FITS_PROFILE),
+             "-i", str(Path(file_path).resolve()),
              "-o", str(report)],
             cwd=str(fits_home), env=environment, shell=False, check=True,
             capture_output=True, text=True, errors="replace", timeout=300,
@@ -396,23 +400,35 @@ def add_object_characteristics(premis_obj, checksum, size, fits_result=None):
 def generate_data_accessioner_xml(data_directory, output_folder, accession_number,
                                   move_files=False, clean_files_only=None, fits_home=None,
                                   fits_workers=2, progress_callback=None):
-    """
-    Copy (or move) files into the accession folder and produce a
-    Data Accessioner-compatible XML manifest with PREMIS technical metadata.
-    This is a Python implementation, not an invocation of DataAccessioner.
-    fits_home (or FITS_HOME) enables content identification using installed FITS.
-    fits_workers is 1 (sequential) or 2 (default). Only identification overlaps;
-    transfers, XML assembly and logging retain input order. progress_callback
-    receives (current_file_number, total_files, relative_path) before waiting.
+    """Compatibility entry point: ingest, then enrich the saved XML with FITS.
 
-    clean_files_only — if provided, only files in this set are transferred;
-                       others are logged as skipped (infected).
+    Use ingest_accession() for baseline-only ingest, and
+    enrich_accession_with_fits() to identify an existing unbagged accession.
+    The legacy progress callback reports identification in inventory order.
+    """
+    if fits_workers not in (1, 2):
+        raise ValueError("fits_workers must be 1 or 2")
+    xml_path = ingest_accession(data_directory, output_folder, accession_number,
+                                move_files, clean_files_only)
+    return enrich_accession_with_fits(
+        Path(output_folder) / accession_number, xml_path,
+        fits_home=fits_home, fits_workers=fits_workers,
+        progress_callback=progress_callback,
+    )
+
+
+def ingest_accession(data_directory, output_folder, accession_number,
+                     move_files=False, clean_files_only=None, progress_callback=None):
+    """Transfer files and write the baseline inventory without configuring FITS.
+
+    Returns <output_folder>/<accession_number>.xml. UUIDs, sizes and MD5s are
+    created here; enrich_accession_with_fits preserves them. This is a fresh
+    ingest operation, not a resume/merge operation for an existing inventory.
     """
     data_directory  = Path(data_directory)
     output_folder   = Path(output_folder)
     accession_folder = output_folder / accession_number
     accession_folder.mkdir(parents=True, exist_ok=True)
-    fits_config = configure_fits(fits_home)
 
     dir_times = {}
 
@@ -427,8 +443,6 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
         f"Transferred on {datetime.now().isoformat()}"
     )
 
-    if fits_workers not in (1, 2):
-        raise ValueError("fits_workers must be 1 or 2")
     total_files = (sum(1 for p in data_directory.rglob("*")
                        if p.is_file() and (clean_files_only is None or p in clean_files_only))
                    if progress_callback is not None else 0)
@@ -441,26 +455,7 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
             except Exception:
                 logging.warning("Could not update accession progress.", exc_info=True)
 
-    def finish_file(dest_path, rel_path, checksum, atime, mtime, future):
-        fits_result = None
-        if future is not None:
-            try:
-                fits_result = future.result()
-            except subprocess.TimeoutExpired:
-                logging.warning("[FITS:TIMEOUT] %s exceeded 300 seconds; format metadata omitted.", dest_path)
-            except subprocess.CalledProcessError as exc:
-                logging.warning("[FITS:EXIT_ERROR] %s; exit code %s; %s", dest_path, exc.returncode,
-                                (exc.stderr or exc.stdout or "No diagnostic output")[-2000:])
-            except (LET.XMLSyntaxError, ValueError) as exc:
-                logging.warning("[FITS:INVALID_XML] %s: %s", dest_path, exc)
-            except (OSError, subprocess.SubprocessError) as exc:
-                logging.warning("[FITS:EXECUTION_ERROR] %s: %s", dest_path, exc)
-            finally:
-                try:
-                    os.utime(dest_path, (atime, mtime))
-                except OSError as exc:
-                    logging.warning("Could not restore timestamps after FITS for %s: %s", dest_path, exc)
-
+    def finish_file(dest_path, rel_path, checksum):
         file_el = LET.SubElement(
             accession_el, "file",
             name=str(rel_path.as_posix()),
@@ -480,68 +475,45 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
         LET.SubElement(
             premis_id, "{info:lc/xmlns/premis-v2}objectIdentifierValue"
         ).text = str(uuid.uuid4())
-        add_object_characteristics(premis_obj, checksum, dest_path.stat().st_size, fits_result)
-        if fits_result is not None:
-            formats = premis_obj.findall(f"{{{PREMIS_NS}}}objectCharacteristics/{{{PREMIS_NS}}}format")
-            puids = premis_obj.findall(f".//{{{PREMIS_NS}}}formatRegistryKey")
-            if formats:
-                logging.info("[FITS:IDENTIFIED] %s; %d format(s); PUIDs: %s", dest_path,
-                             len(formats), ", ".join(p.text for p in puids) or "none reported")
-            else:
-                logging.info("[FITS:NO_IDENTIFICATION] %s; FITS completed but returned no useful "
-                             "format identification. Raw FITS XML retained.", dest_path)
+        add_object_characteristics(premis_obj, checksum, dest_path.stat().st_size)
 
-    pending = deque()
-    with ThreadPoolExecutor(max_workers=fits_workers) as executor:
-        for file_path in data_directory.rglob("*"):
+    for file_path in data_directory.rglob("*"):
 
-            # Record directory timestamps so we can restore them after copying
-            if file_path.is_dir():
-                stat = file_path.stat()
-                rel  = file_path.relative_to(data_directory)
-                dir_times[rel] = (stat.st_atime, stat.st_mtime)
+        # Record directory timestamps so we can restore them after copying
+        if file_path.is_dir():
+            stat = file_path.stat()
+            rel  = file_path.relative_to(data_directory)
+            dir_times[rel] = (stat.st_atime, stat.st_mtime)
 
-            if not file_path.is_file():
-                continue
+        if not file_path.is_file():
+            continue
 
-            # Skip infected files when a filter is active
-            if clean_files_only is not None and file_path not in clean_files_only:
-                logging.warning(f"[SKIPPED — INFECTED] {file_path}")
-                continue
+        # Skip infected files when a filter is active
+        if clean_files_only is not None and file_path not in clean_files_only:
+            logging.warning(f"[SKIPPED — INFECTED] {file_path}")
+            continue
 
-            stat_src = file_path.stat()
-            atime    = stat_src.st_atime
-            mtime    = stat_src.st_mtime
+        stat_src = file_path.stat()
+        atime    = stat_src.st_atime
+        mtime    = stat_src.st_mtime
 
-            rel_path  = file_path.relative_to(data_directory)
-            dest_path = accession_folder / rel_path
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
+        rel_path  = file_path.relative_to(data_directory)
+        dest_path = accession_folder / rel_path
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-            if move_files:
-                shutil.move(str(file_path), str(dest_path))
-            else:
-                shutil.copy2(str(file_path), str(dest_path))
+        if move_files:
+            shutil.move(str(file_path), str(dest_path))
+        else:
+            shutil.copy2(str(file_path), str(dest_path))
 
-            # Restore original timestamps explicitly after copy
-            os.utime(dest_path, (atime, mtime))
+        # Restore original timestamps explicitly after copy
+        os.utime(dest_path, (atime, mtime))
 
-            checksum = compute_md5(dest_path)
-            if fits_config:
-                future = executor.submit(identify_with_fits, dest_path, *fits_config)
-            else:
-                future = None
-            pending.append((dest_path, rel_path, checksum, atime, mtime, future))
-            if len(pending) >= (fits_workers if fits_config else 1):
-                item = pending.popleft()
-                report_progress(item[1])
-                finish_file(*item)
-                completed += 1
-
-        while pending:
-            item = pending.popleft()
-            report_progress(item[1])
-            finish_file(*item)
-            completed += 1
+        checksum = compute_md5(dest_path)
+        os.utime(dest_path, (atime, mtime))
+        report_progress(rel_path)
+        finish_file(dest_path, rel_path, checksum)
+        completed += 1
 
     xml_output_file = output_folder / f"{accession_number}.xml"
     LET.ElementTree(collection_el).write(
@@ -562,6 +534,147 @@ def generate_data_accessioner_xml(data_directory, output_folder, accession_numbe
                 pass
 
     return xml_output_file
+
+
+def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
+                               fits_workers=2, progress_callback=None):
+    """Enrich an existing inventory in place without transferring or hashing.
+
+    accession_folder is the unbagged payload root. Only files listed in XML
+    are identified. Successful results replace prior FITS-derived formats and
+    FITS extension trees; failed files retain all existing metadata. Baseline
+    attributes, UUIDs, fixity, size and unrelated metadata are left untouched.
+    Returns xml_input. No status tracking or post-bag path discovery is done.
+    """
+    if fits_workers not in (1, 2):
+        raise ValueError("fits_workers must be 1 or 2")
+    accession_folder = Path(accession_folder).resolve()
+    xml_input = Path(xml_input)
+    tree = LET.parse(str(xml_input), LET.XMLParser(resolve_entities=False, no_network=True))
+    files = tree.findall(".//{http://dataaccessioner.org/schema/dda-1-1}file")
+    fits_config = configure_fits(fits_home)
+    completed = 0
+
+    def finish_file(file_el, dest_path, times, future):
+        nonlocal completed
+        completed += 1
+        if progress_callback is not None:
+            try:
+                progress_callback(completed, len(files), file_el.get("name"))
+            except Exception:
+                logging.warning("Could not update accession progress.", exc_info=True)
+        if future is None:
+            return
+        try:
+            fits_result = future.result()
+        except subprocess.TimeoutExpired:
+            logging.warning("[FITS:TIMEOUT] %s exceeded 300 seconds; existing metadata retained.", dest_path)
+            return
+        except subprocess.CalledProcessError as exc:
+            logging.warning("[FITS:EXIT_ERROR] %s; exit code %s; %s", dest_path, exc.returncode,
+                            (exc.stderr or exc.stdout or "No diagnostic output")[-2000:])
+            return
+        except (LET.XMLSyntaxError, ValueError) as exc:
+            logging.warning("[FITS:INVALID_XML] %s: %s", dest_path, exc)
+            return
+        except (OSError, subprocess.SubprocessError) as exc:
+            logging.warning("[FITS:EXECUTION_ERROR] %s: %s", dest_path, exc)
+            return
+        finally:
+            try:
+                os.utime(dest_path, times)
+            except OSError as exc:
+                logging.warning("Could not restore timestamps after FITS for %s: %s", dest_path, exc)
+
+        characteristics = file_el.find(f"{{{PREMIS_NS}}}object/{{{PREMIS_NS}}}objectCharacteristics")
+        _replace_fits_metadata(characteristics, fits_result)
+        formats = characteristics.findall(f"{{{PREMIS_NS}}}format")
+        puids = characteristics.findall(f".//{{{PREMIS_NS}}}formatRegistryKey")
+        if formats:
+            logging.info("[FITS:IDENTIFIED] %s; %d format(s); PUIDs: %s", dest_path,
+                         len(formats), ", ".join(p.text for p in puids) or "none reported")
+        else:
+            logging.info("[FITS:NO_IDENTIFICATION] %s; FITS completed but returned no useful "
+                         "format identification. Raw FITS XML retained.", dest_path)
+
+    pending = deque()
+    with ThreadPoolExecutor(max_workers=fits_workers) as executor:
+        for file_el in files:
+            dest_path = accession_folder / (file_el.get("name") or "")
+            future = None
+            times = None
+            if fits_config:
+                try:
+                    dest_path = dest_path.resolve()
+                    dest_path.relative_to(accession_folder)
+                    if not dest_path.is_file():
+                        raise FileNotFoundError(f"Payload file missing: {dest_path}")
+                    if file_el.find(f"{{{PREMIS_NS}}}object/{{{PREMIS_NS}}}objectCharacteristics") is None:
+                        raise ValueError("File record has no baseline PREMIS characteristics")
+                    stat = dest_path.stat()
+                    times = (stat.st_atime, stat.st_mtime)
+                    future = executor.submit(identify_with_fits, dest_path, *fits_config)
+                except (OSError, ValueError) as exc:
+                    logging.warning("[FITS:EXECUTION_ERROR] %s: %s", dest_path, exc)
+            pending.append((file_el, dest_path, times, future))
+            if len(pending) >= (fits_workers if fits_config else 1):
+                finish_file(*pending.popleft())
+        while pending:
+            finish_file(*pending.popleft())
+
+    if fits_config:
+        # Replace only after serialization succeeds, preserving the saved baseline
+        # if writing the enriched document fails.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=xml_input.parent, prefix=xml_input.name + ".",
+                                             suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                tree.write(stream, encoding="UTF-8", xml_declaration=True, pretty_print=True)
+            os.replace(temporary, xml_input)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+    return xml_input
+
+
+def _replace_fits_metadata(characteristics, fits_result):
+    """Replace only formats derived from embedded FITS and FITS extension data.
+
+    Reuse the existing mapper on a scratch object. Matching against the previous
+    embedded report avoids deleting manually supplied, unrelated format entries.
+    """
+    def mapped_formats(result):
+        scratch = LET.Element(f"{{{PREMIS_NS}}}object")
+        add_object_characteristics(scratch, "", 0, result)
+        return scratch.find(f"{{{PREMIS_NS}}}objectCharacteristics")
+
+    def signature(node):
+        return (node.tag, tuple(sorted(node.attrib.items())), (node.text or "").strip(),
+                tuple(signature(child) for child in node))
+
+    replacement = mapped_formats(fits_result)
+    for extension in list(characteristics.findall(f"{{{PREMIS_NS}}}objectCharacteristicsExtension")):
+        previous_reports = list(extension.findall(f"{{{FITS_NS}}}fits"))
+        for old_fits in previous_reports:
+            old_formats = mapped_formats(old_fits)
+            for old_format in old_formats.findall(f"{{{PREMIS_NS}}}format"):
+                for current in list(characteristics.findall(f"{{{PREMIS_NS}}}format")):
+                    if signature(current) == signature(old_format):
+                        characteristics.remove(current)
+                        break
+            extension.remove(old_fits)
+        if previous_reports and len(extension) == 0 and not extension.attrib and not (extension.text or "").strip():
+            characteristics.remove(extension)
+    # PREMIS formats precede extensions (and other later characteristics).
+    position = next((i for i, child in enumerate(characteristics)
+                     if child.tag not in {f"{{{PREMIS_NS}}}{name}" for name in
+                                          ("compositionLevel", "fixity", "size", "format")}),
+                    len(characteristics))
+    for fmt in replacement.findall(f"{{{PREMIS_NS}}}format"):
+        characteristics.insert(position, fmt)
+        position += 1
+    characteristics.append(replacement.find(f"{{{PREMIS_NS}}}objectCharacteristicsExtension"))
 
 
 # ==========================
@@ -629,182 +742,230 @@ def _write_aptrust_info(bag_dir, title, access, storage_option, description=""):
     logging.info(f"aptrust-info.txt written and tag manifest updated at: {bag_dir}")
 
 
+def _bag_preflight(accession_folder, accession_number, contact_name, contact_email,
+                   source_organization, profile, title, access, storage_option,
+                   description, xml_manifest):
+    """Return the payload root, entries and verified MD5s without writing files."""
+    if not BAGIT_AVAILABLE:
+        raise RuntimeError("bagit-python is not installed.")
+    root = Path(accession_folder)
+    if root.is_symlink() or root.is_junction():
+        raise ValueError("Accession root must not be a symbolic link or junction.")
+    if not root.is_dir():
+        raise ValueError(f"Accession directory does not exist or is not a directory: {root}")
+    root = root.resolve()
+    if profile not in ("generic", "aptrust"):
+        raise ValueError(f"Unknown BagIt profile: {profile!r}")
+    for name, value in {
+        "accession_number": accession_number, "contact_name": contact_name,
+        "contact_email": contact_email, "source_organization": source_organization,
+        "title": title, "access": access, "storage_option": storage_option,
+        "description": description,
+    }.items():
+        if not isinstance(value, str) or any(c in value for c in "\r\n\0"):
+            raise ValueError(f"{name} must be a single-line string without NUL characters.")
+        value.encode("utf-8")
+    if not accession_number.strip():
+        raise ValueError("Accession number is required.")
+    if profile == "aptrust":
+        if not title.strip() or not source_organization.strip():
+            raise ValueError("APTrust requires Title and Source-Organization before construction.")
+        if access not in APTRUST_ACCESS_VALUES:
+            raise ValueError(f"Invalid APTrust Access: {access!r}")
+        if storage_option not in APTRUST_STORAGE_OPTIONS:
+            raise ValueError(f"Invalid APTrust Storage-Option: {storage_option!r}")
+
+    entries = sorted(root.iterdir())
+    reserved = {"data", "bagit.txt", "bag-info.txt", "aptrust-info.txt", "fetch.txt"}
+    for entry in entries:
+        name = entry.name.casefold()
+        if name in reserved or re.fullmatch(r"(?:tag)?manifest-.*\.txt", name):
+            raise ValueError(f"Existing or ambiguous BagIt layout: {entry.name!r}. "
+                             "Construction will not rebuild or relocate an existing bag.")
+    if not os.access(root, os.W_OK):
+        raise PermissionError(f"Accession directory is not writable: {root}")
+
+    payload = {}
+    seen = set()
+
+    def walk_error(exc):
+        raise exc
+
+    # Do not follow links/reparse directories: they could escape the accession
+    # or change meaning when relocated. Reject names this manifest writer cannot
+    # represent unambiguously rather than silently encoding a different path.
+    for directory, directories, filenames in os.walk(root, onerror=walk_error, followlinks=False):
+        for name in sorted(directories + filenames):
+            path = Path(directory) / name
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink() or path.is_junction():
+                raise ValueError(f"Payload links/junctions are not supported: {rel}")
+            if any(c in rel for c in "\r\n\\%") or any(part != part.strip() for part in rel.split("/")):
+                raise ValueError(f"Unsupported manifest path: {rel!r}")
+            rel.encode("utf-8")
+            if rel.casefold() in seen:
+                raise ValueError(f"Case-insensitive payload path collision: {rel}")
+            seen.add(rel.casefold())
+            if path.is_file():
+                payload[rel] = path
+            elif not path.is_dir():
+                raise ValueError(f"Unsupported payload entry: {rel}")
+
+    baseline = None
+    if xml_manifest is not None:
+        try:
+            tree = LET.parse(str(xml_manifest), LET.XMLParser(resolve_entities=False, no_network=True))
+            ns = {"d": "http://dataaccessioner.org/schema/dda-1-1"}
+            if tree.getroot().tag != "{http://dataaccessioner.org/schema/dda-1-1}collection":
+                raise ValueError("Expected a Data Accessioner collection XML baseline")
+            baseline = {}
+            for record in tree.xpath("//d:file", namespaces=ns):
+                name, digest = record.get("name", ""), record.get("MD5", "")
+                if (not name or "\\" in name or ":" in name
+                        or any(part in ("", ".", "..") for part in name.split("/"))):
+                    raise ValueError(f"Invalid baseline relative path: {name!r}")
+                if name in baseline:
+                    raise ValueError(f"Duplicate baseline file record: {name}")
+                if not re.fullmatch(r"[0-9a-fA-F]{32}", digest):
+                    raise ValueError(f"Invalid baseline MD5 for {name}")
+                baseline[name] = digest.lower()
+        except (OSError, LET.XMLSyntaxError, ValueError) as exc:
+            raise ValueError(f"Cannot verify supplied XML baseline: {exc}") from exc
+        missing = sorted(set(baseline) - set(payload))
+        extra = sorted(set(payload) - set(baseline))
+        if missing or extra:
+            raise ValueError(f"Payload differs from XML baseline; missing={missing}; unexpected={extra}")
+
+    checksums = {}
+    for rel, path in sorted(payload.items()):
+        digest = compute_md5(path)
+        if baseline is not None and digest != baseline[rel]:
+            raise ValueError(f"Baseline MD5 mismatch: {rel}. Construction refused before payload movement.")
+        checksums[rel] = baseline[rel] if baseline is not None else digest
+    logging.info("BagIt preflight passed: %d payload files; %s.", len(checksums),
+                 "XML baseline verified" if baseline is not None else "fresh MD5s (no XML baseline supplied)")
+    return root, entries, checksums
+
+
+def construct_bag(accession_folder, accession_number, contact_name="", contact_email="",
+                  source_organization="", profile="generic", title="",
+                  access="Institution", storage_option="Standard", description="",
+                  xml_manifest=None):
+    """Construct an unbagged accession in place; return its resolved Path.
+
+    Reject existing/ambiguous bags and verify a supplied XML baseline before
+    mutation. Without XML, hash the current payload. Never validate or serialize.
+    Exceptions propagate. Unexpected I/O failures can leave partial construction;
+    there is no rollback or automatic retry. Keep payload quiescent throughout.
+    """
+    root, entries, checksums = _bag_preflight(
+        accession_folder, accession_number, contact_name, contact_email,
+        source_organization, profile, title, access, storage_option, description,
+        xml_manifest,
+    )
+    metadata = {
+        "Bag-Software-Agent": "bagit-python",
+        "Bagging-Date": datetime.now().strftime("%Y-%m-%d"),
+        "External-Identifier": accession_number,
+    }
+    for key, value in (("Contact-Name", contact_name), ("Contact-Email", contact_email),
+                       ("Source-Organization", source_organization)):
+        if value:
+            metadata[key] = value
+    if profile == "aptrust":
+        metadata["BagIt-Profile-Identifier"] = APTRUST_PROFILE_IDENTIFIER
+
+    try:
+        data_dir = root / "data"
+        data_dir.mkdir()  # Never reuse a destination that appeared after preflight.
+        for item in entries:
+            destination = data_dir / item.name
+            if os.path.lexists(destination):
+                raise FileExistsError(f"Payload destination already exists: {destination}")
+            shutil.move(str(item), str(destination))
+        (root / "bagit.txt").write_text(
+            "BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n", encoding="utf-8")
+        (root / "bag-info.txt").write_text(
+            "".join(f"{key}: {value}\n" for key, value in metadata.items()), encoding="utf-8")
+        (root / "manifest-md5.txt").write_text(
+            "".join(f"{digest}  data/{rel}\n" for rel, digest in checksums.items()), encoding="utf-8")
+        tags = ("bagit.txt", "bag-info.txt", "manifest-md5.txt")
+        (root / "tagmanifest-md5.txt").write_text(
+            "".join(f"{compute_md5(root / name)}  {name}\n" for name in tags), encoding="utf-8")
+        if profile == "aptrust":
+            _write_aptrust_info(root, title, access, storage_option, description)
+    except Exception:
+        logging.exception("BagIt construction failed at %s. The accession may be partially "
+                          "modified; do not rerun construction or attempt automatic recovery.", root)
+        raise
+    logging.info("BagIt construction complete: %s", root)
+    return root
+
+
+def serialize_bag_to_tar(bag_path):
+    """Serialize an existing bag to a sibling <bag-name>.tar and return its Path.
+
+    Checks basic structure only, not checksums or APTrust compliance. Does not
+    construct, validate, move payload or regenerate manifests. Failed writes or
+    replacement preserve a previous TAR; the bag must remain unchanged meanwhile.
+    """
+    root = Path(bag_path).resolve()
+    if (not root.is_dir() or not (root / "data").is_dir()
+            or not (root / "bagit.txt").is_file()
+            or not any(p.is_file() for p in root.glob("manifest-*.txt"))):
+        raise ValueError(f"Expected an existing BagIt directory: {root}")
+    tar_path = root.parent / (root.name + ".tar")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=root.parent, prefix=tar_path.name + ".",
+                                         suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+        with tarfile.open(temporary, "w") as archive:
+            archive.add(root, arcname=root.name)
+        os.replace(temporary, tar_path)
+    except Exception:
+        logging.exception("TAR serialization failed for %s; previous deliverable retained.", root)
+        raise
+    finally:
+        if temporary is not None and temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                logging.warning("Could not remove temporary TAR: %s", temporary, exc_info=True)
+    logging.info("Bag serialized to tar: %s", tar_path)
+    return tar_path
+
+
 def create_bag(accession_folder, accession_number, contact_name="", contact_email="",
                source_organization="", profile="generic", title="",
                access="Institution", storage_option="Standard",
                description="", serialize_tar=False, validate=False,
                xml_manifest=None):
-    """
-    Convert the accession folder into a valid BagIt bag in-place.
+    """Compatibility wrapper: construct, optionally validate, optionally serialize.
 
-    profile:
-        "generic"  — standard BagIt bag (bag-info.txt only)
-        "aptrust"  — APTrust profile (adds aptrust-info.txt; optionally tars)
-
-    For APTrust bags, title and source_organization are required.
-    access must be one of: Institution, Restricted, Consortia
-    storage_option sets the APTrust storage tier (Standard, Glacier-*, etc.)
-
-    If serialize_tar is True and profile is "aptrust", the bag directory is
-    archived into <accession_number>.tar beside the accession folder, matching
-    APTrust's required serialization format.
-
-    validate     — if True, verifies all file checksums against the manifest
-                   after bagging. Skipped by default since it rehashes every
-                   file (all files were already hashed during Data Accessioner).
-    xml_manifest — path to the Data Accessioner XML report. When supplied,
-                   MD5s are read from it rather than recomputed, making
-                   bagging significantly faster for large collections.
-
-    Returns (bag_path, tar_path, bag_valid, bag_error).
-    Requires: pip install bagit-python
+    Return (bag_path, tar_path, bag_valid, bag_error); bag_valid is None if not
+    requested. Requested validation failure blocks TAR creation. As before,
+    this wrapper serializes only APTrust bags. Construction errors propagate.
     """
     if not BAGIT_AVAILABLE:
-        logging.warning(
-            "bagit-python is not installed. BagIt packaging skipped. "
-            "Run: pip install bagit-python"
-        )
+        logging.warning("bagit-python is not installed. BagIt packaging skipped.")
         return None, None, False, "bagit-python is not installed."
-
-    accession_folder = Path(accession_folder).resolve()
-
-    # Build bag-info.txt metadata
-    bag_metadata = {
-        "Bag-Software-Agent": "bagit-python",
-        "Bagging-Date":       datetime.now().strftime("%Y-%m-%d"),
-        "External-Identifier": accession_number,
-    }
-    if contact_name:
-        bag_metadata["Contact-Name"]  = contact_name
-    if contact_email:
-        bag_metadata["Contact-Email"] = contact_email
-    if source_organization:
-        bag_metadata["Source-Organization"] = source_organization
-    if profile == "aptrust":
-        bag_metadata["BagIt-Profile-Identifier"] = APTRUST_PROFILE_IDENTIFIER
-
-    import time
-
-    # bagit.make_bag() moves files through a temp directory using os.rename,
-    # which Windows denies if anything has an open handle on the folder tree
-    # (Explorer, antivirus, or a previous pipeline step). We build the bag
-    # structure manually instead: move files into data/, write tag files, then
-    # let bagit.Bag() read the result without touching os.rename at all.
-
-    data_dir = accession_folder / "data"
-    data_dir.mkdir(exist_ok=True)
-
-    # Move all existing files and subdirectories into data/
-    # Retry up to 5 times with a short delay for transient Windows locks
-    for item in list(accession_folder.iterdir()):
-        if item.name == "data":
-            continue
-        dest = data_dir / item.name
-        for attempt in range(5):
-            try:
-                shutil.move(str(item), str(dest))
-                break
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.5)
-
-    # Write bagit.txt
-    (accession_folder / "bagit.txt").write_text(
-        "BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n",
-        encoding="utf-8"
+    bag_root = construct_bag(
+        accession_folder, accession_number, contact_name=contact_name,
+        contact_email=contact_email, source_organization=source_organization,
+        profile=profile, title=title, access=access, storage_option=storage_option,
+        description=description, xml_manifest=xml_manifest,
     )
-
-    # Write bag-info.txt
-    bag_info_lines = []
-    for key, value in bag_metadata.items():
-        bag_info_lines.append(f"{key}: {value}")
-    (accession_folder / "bag-info.txt").write_text(
-        "\n".join(bag_info_lines) + "\n", encoding="utf-8"
-    )
-
-    # Generate manifest-md5.txt by reading checksums already computed during
-    # the Data Accessioner step — no need to rehash every file again.
-    # xml_manifest is optional; if not provided we fall back to hashing.
-    manifest_lines = []
-    if xml_manifest is not None:
-        try:
-            tree    = LET.parse(str(xml_manifest))
-            root_el = tree.getroot()
-            ns      = {"d": "http://dataaccessioner.org/schema/dda-1-1"}
-            md5_map = {
-                file_el.get("name"): file_el.get("MD5")
-                for file_el in root_el.xpath("//d:file", namespaces=ns)
-            }
-            for file_path in sorted(data_dir.rglob("*")):
-                if file_path.is_file():
-                    rel       = file_path.relative_to(accession_folder).as_posix()
-                    # XML stores paths without the leading "data/" prefix
-                    xml_key   = file_path.relative_to(data_dir).as_posix()
-                    checksum  = md5_map.get(xml_key) or compute_md5(file_path)
-                    manifest_lines.append(f"{checksum}  {rel}")
-            logging.info("BagIt manifest built from existing XML checksums (no rehashing).")
-        except Exception as exc:
-            logging.warning(f"Could not read XML manifest for BagIt ({exc}); falling back to hashing.")
-            manifest_lines = []
-
-    if not manifest_lines:
-        for file_path in sorted(data_dir.rglob("*")):
-            if file_path.is_file():
-                rel = file_path.relative_to(accession_folder).as_posix()
-                manifest_lines.append(f"{compute_md5(file_path)}  {rel}")
-    (accession_folder / "manifest-md5.txt").write_text(
-        "\n".join(manifest_lines) + "\n", encoding="utf-8"
-    )
-
-    # Generate tagmanifest-md5.txt (hash the tag files themselves)
-    tag_files = ["bagit.txt", "bag-info.txt", "manifest-md5.txt"]
-    tag_manifest_lines = []
-    for tag_file in tag_files:
-        tf_path = accession_folder / tag_file
-        if tf_path.exists():
-            tag_manifest_lines.append(f"{compute_md5(tf_path)}  {tag_file}")
-    (accession_folder / "tagmanifest-md5.txt").write_text(
-        "\n".join(tag_manifest_lines) + "\n", encoding="utf-8"
-    )
-
-    bag_root = accession_folder.resolve()
-    logging.info(f"BagIt bag created at: {bag_root}")
-
-    # Write APTrust-specific tag file
-    if profile == "aptrust":
-        if not title:
-            raise ValueError("APTrust profile requires a Title.")
-        if not source_organization:
-            raise ValueError("APTrust profile requires a Source-Organization.")
-        _write_aptrust_info(bag_root, title, access, storage_option, description)
-
-    # Optionally validate — rehashes every file so skipped by default
-    bag_valid = None
-    bag_error = ""
+    bag_valid, bag_error = None, ""
     if validate:
-        try:
-            bagit.Bag(str(bag_root)).validate()
-            bag_valid = True
-            logging.info("BagIt bag validated successfully.")
-        except bagit.BagValidationError as exc:
-            bag_valid = False
-            bag_error = str(exc)
-            logging.warning(f"BagIt validation warning: {bag_error}")
-        except Exception as exc:
-            bag_valid = False
-            bag_error = str(exc)
-            logging.warning(f"BagIt validation error: {bag_error}")
-
-    # Optionally serialise to .tar (required for APTrust ingest uploads)
-    # The source bag directory is kept alongside the .tar for local reference.
+        bag_valid, bag_error = validate_bag(bag_root)
+        if bag_valid:
+            logging.info("BagIt bag validated successfully: %s", bag_root)
+        else:
+            logging.warning("BagIt validation failed; TAR serialization blocked: %s", bag_error)
     tar_path = None
-    if serialize_tar and profile == "aptrust":
-        tar_path = bag_root.parent / (bag_root.name + ".tar")
-        with tarfile.open(tar_path, "w") as tf:
-            tf.add(bag_root, arcname=bag_root.name)
-        logging.info(f"Bag serialized to tar: {tar_path}")
-
+    if serialize_tar and profile == "aptrust" and (not validate or bag_valid):
+        tar_path = serialize_bag_to_tar(bag_root)
     return bag_root, tar_path, bag_valid, bag_error
 
 

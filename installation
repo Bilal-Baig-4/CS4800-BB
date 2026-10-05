@@ -36,6 +36,12 @@ available, launch the GUI normally; FITS_HOME is not required. Discovery is
 relative to pipeline.py, so launching from another working directory also works.
 Java is still a separate prerequisite; it is not bundled.
 
+The Pipeline selects config/fits-droid.xml with FITS's -f option. Only DROID
+runs, providing PRONOM/PUID identification. Python retains MD5, size and transfer
+responsibilities. Keep this profile with pipeline.py. All other FITS tools and
+the original xml/fits.xml remain bundled for future re-enablement; see
+FITS-droid-only.md. Launching fits.bat without -f still uses the full vendor profile.
+
 For a complete repository checkout, follow step 1 below, then run `py GUI.py`.
 Steps 2-4 describe an optional external FITS installation/override. To run the
 direct diagnostic commands in steps 5-6 against the bundled copy, first set
@@ -105,9 +111,11 @@ Windows setup
 
    $sampleFile = (Resolve-Path "C:\path\to\sample.pdf").Path
    $fitsReport = Join-Path $env:TEMP 'pipeline-fits-sample.xml'
+   # Run from the repository root before changing directories:
+   $fitsProfile = (Resolve-Path .\config\fits-droid.xml).Path
    Push-Location $env:FITS_HOME
    try {
-       & .\fits.bat -i $sampleFile -o $fitsReport
+       & .\fits.bat -f $fitsProfile -i $sampleFile -o $fitsReport
        $fitsExit = $LASTEXITCODE
    } finally { Pop-Location }
    $fitsExit

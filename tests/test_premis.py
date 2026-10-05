@@ -206,6 +206,7 @@ class PremisTests(unittest.TestCase):
         def run(command, **kwargs):
             self.assertFalse(kwargs["shell"])
             self.assertTrue(kwargs["check"])
+            self.assertEqual(command[command.index("-f") + 1], str(pipeline.FITS_PROFILE))
             self.assertEqual(command[command.index("-i") + 1], str(self.file.resolve()))
             Path(command[command.index("-o") + 1]).write_bytes(FITS)
         with patch.object(pipeline.subprocess, "run", side_effect=run):
@@ -222,7 +223,74 @@ class PremisTests(unittest.TestCase):
         self.assertIn("fmt/18", rows[0]["format registry key/PUID"])
         self.assertIn("application/pdf", rows[0]["MIME Type"])
         self.assertIn("1.4", rows[0]["format version"])
+        tools = tree.xpath("//f:identification/f:identity/f:tool/@toolname",
+                           namespaces={"f": pipeline.FITS_NS})
+        self.assertEqual(set(tools), {"Droid"})
+        self.assertTrue(rows[0]["Identified By"].startswith("Droid v"))
+        self.assertNotIn(" | ", rows[0]["Identified By"])
+        provenance = ET.HTML(html).xpath("//tr[th='Identified by']/td/text()")
+        self.assertTrue(provenance)
+        self.assertTrue(all(value.startswith("Droid v") for value in provenance))
         self.assert_basics(tree, rows)
+
+    def test_droid_only_fixture_through_xml_html_csv(self):
+        result = ET.fromstring(FITS)
+        identity = result[0][0]
+        identity.remove(identity[1])  # Historical full-FITS fixture includes JHOVE.
+        with patch.object(pipeline, "identify_with_fits", return_value=result):
+            tree, html, rows = self.reports(fits_home="configured-fits")
+        self.assertEqual(tree.findtext(".//p:formatRegistryKey", namespaces=NS), "fmt/18")
+        self.assertEqual(tree.findtext(".//p:formatRegistryName", namespaces=NS),
+                         "http://www.nationalarchives.gov.uk/pronom")
+        self.assertIn("Portable Document Format 1.4", html)
+        self.assertIn("fmt/18", html)
+        self.assertEqual(rows[0]["format registry key/PUID"], "fmt/18")
+        self.assertEqual(rows[0]["MIME Type"], "application/pdf")
+        self.assertEqual(rows[0]["Identified By"], "Droid v6")
+        for disabled in ("Jhove", "Exiftool", "Tika", "File Utility", "MediaInfo"):
+            self.assertNotIn(disabled, ET.tostring(tree).decode())
+            self.assertNotIn(disabled, html)
+            self.assertNotIn(disabled, str(rows))
+        self.assert_basics(tree, rows)
+
+    def test_pipeline_profile_enables_only_droid_for_all_extensions(self):
+        profile = ET.parse(str(pipeline.FITS_PROFILE))
+        tools = profile.findall("tools/tool")
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0].get("class"), "edu.harvard.hul.ois.fits.tools.droid.Droid")
+        self.assertEqual(tools[0].get("classpath-dirs"), "lib/droid")
+        self.assertIsNone(tools[0].get("exclude-exts"))
+        self.assertIsNone(tools[0].get("include-exts"))
+        self.assertEqual(profile.findtext("output/enable-checksum"), "false")
+        self.assertGreater(len(ET.parse(str(ROOT / "tools/fits-1.6.0/xml/fits.xml"))
+                               .findall("tools/tool")), 1)
+
+    def test_missing_profile_never_falls_back_to_full_fits(self):
+        with patch.object(pipeline, "FITS_PROFILE", self.base / "missing.xml"), \
+             patch.object(pipeline.subprocess, "run") as run:
+            with self.assertRaises(FileNotFoundError):
+                pipeline.identify_with_fits(self.file, self.base)
+        run.assert_not_called()
+
+    def test_droid_enrichment_replaces_prior_full_fits_provenance(self):
+        with patch.object(pipeline, "identify_with_fits", return_value=ET.fromstring(FITS)):
+            tree, _, _ = self.reports(fits_home="configured-fits")
+        digest = tree.findtext(".//p:messageDigest", namespaces=NS)
+        result = ET.fromstring(FITS)
+        result[0][0].remove(result[0][0][1])
+        with patch.object(pipeline, "configure_fits", return_value=("fits", "java")), \
+             patch.object(pipeline, "identify_with_fits", return_value=result):
+            pipeline.enrich_accession_with_fits(self.output / "A", self.output / "A.xml")
+        tree = ET.parse(str(self.output / "A.xml"))
+        self.assertEqual(tree.findtext(".//p:messageDigest", namespaces=NS), digest)
+        self.assertNotIn("Jhove", ET.tostring(tree).decode())
+        for ext in ("html", "csv"):
+            output = self.output / f"droid.{ext}"
+            pipeline.run_xslt_processor(self.output / "A.xml", ROOT / f"files.{ext}.xslt", output)
+            text = output.read_text(encoding="utf-8")
+            self.assertIn("Droid v6", text)
+            self.assertIn("fmt/18", text)
+            self.assertNotIn("Jhove", text)
 
 
 class FitsConfigurationTests(unittest.TestCase):
