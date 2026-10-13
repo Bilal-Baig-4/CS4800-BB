@@ -350,19 +350,20 @@ class SelectiveExecutionTests(unittest.TestCase):
     def test_snapshot_locking_and_restore_after_worker(self):
         self.select(4)
         g = self.g
-        with patch.object(g["threading"], "Thread") as thread:
+        with patch.object(g["threading"], "Thread") as thread, \
+             patch.dict(g, confirm_run=MagicMock(return_value=True)):
             g["start_pipeline"]()
-        self.assertTrue(g["inputs_locked"])
-        for widget in g["lockable_inputs"]:
-            self.assertEqual(str(widget.cget("state")), "disabled")
-        options = thread.call_args.kwargs["args"][0]
-        self.assertTrue(options["steps"]["fixity"])
-        self.assertEqual(g["run_button"].cget("state"), "disabled")
-        g["run_pipeline"](options)
-        self.assertFalse(g["inputs_locked"])
-        self.assertEqual(g["chk_move"].cget("state"), "disabled")
-        self.assertEqual(g["rb_aptrust"].cget("state"), "disabled")
-        self.assertEqual(g["run_button"].cget("state"), "normal")
+            self.assertTrue(g["inputs_locked"])
+            for widget in g["lockable_inputs"]:
+                self.assertEqual(str(widget.cget("state")), "disabled")
+            options = thread.call_args.kwargs["args"][0]
+            self.assertTrue(options["steps"]["fixity"])
+            self.assertEqual(g["run_button"].cget("state"), "disabled")
+            g["run_pipeline"](options)
+            self.assertFalse(g["inputs_locked"])
+            self.assertEqual(g["chk_move"].cget("state"), "disabled")
+            self.assertEqual(g["rb_aptrust"].cget("state"), "disabled")
+            self.assertEqual(g["run_button"].cget("state"), "normal")
 
     def test_failure_unlock_restores_profile_and_parent_rules(self):
         self.select(5)

@@ -3,7 +3,7 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from pipeline_state import status as ps
 from pipeline_state.resume import build_resume_plan, format_execution_plan
@@ -260,19 +260,98 @@ class ResumeExecutionTests(unittest.TestCase):
         with patch.object(self.g["threading"], "Thread") as thread:
             self.g["start_pipeline"]()
         thread.assert_not_called()
-        self.assertIn("previous attempt may be interrupted", self.messages.showerror.call_args.args[1])
+        self.assertIn("previous attempt may still be running or was interrupted", self.messages.showerror.call_args.args[1])
         self.assertEqual(before, (self.output / "A_status.json").read_bytes())
 
     def test_preview_precedes_thread_and_does_not_change_selections(self):
         self.select(2)
         before = self.g["run_format_identification"].get()
-        with patch.object(self.g["threading"], "Thread") as thread:
+        with patch.object(self.g["threading"], "Thread") as thread, \
+             patch.dict(self.g, confirm_run=MagicMock(return_value=True)):
             self.g["start_pipeline"]()
-        self.assertEqual(self.messages.showinfo.call_args.args[0], "Execution Plan")
-        self.assertIn("Format Identification — Run", self.messages.showinfo.call_args.args[1])
+            self.assertIn("Step 2 — Format Identification", self.g["confirm_run"].call_args.args[0])
         thread.return_value.start.assert_called_once()
         self.assertEqual(self.g["run_format_identification"].get(), before)
         self.g["restore_run_controls"]()
+
+    def display_plan(self, **actions):
+        return [dict(stage=stage, action=actions.get(stage, "skip"),
+                     reason="no_managed_status" if stage in actions else "not_requested")
+                for stage in ps.STAGE_IDS]
+
+    def test_confirmation_new_ingest_hides_internal_details(self):
+        plan = self.display_plan(antivirus="run", ingest="run")
+        text = self.g["format_run_confirmation"](plan, {"move": False})
+        self.assertIn("Step 1 — Ingest\n  • Microsoft Defender scan\n  • Copy files into accession", text)
+        self.assertIn("Other steps will not run.", text)
+        for hidden in ("managed", "Not Selected", "Freshness", "Step 2", "no_managed_status"):
+            self.assertNotIn(hidden, text)
+        self.assertEqual(plan, self.display_plan(antivirus="run", ingest="run"))
+        self.assertIn("Move files into accession", self.g["format_run_confirmation"](plan, {"move": True}))
+
+    def test_confirmation_partial_reports_and_bagging_reuse(self):
+        plan = self.display_plan(reports="reuse", summary="run", fixity="run",
+                                 bag_construct="reuse", bag_validate="run", tar_serialize="run")
+        text = self.g["format_run_confirmation"](plan, {})
+        self.assertIn("Step 3 — Reports\n  • Collection summary", text)
+        self.assertNotIn("Metadata reports", text)
+        self.assertIn("Step 4 — Fixity", text)
+        self.assertIn("Step 5 — Bagging\n  • Validate BagIt package\n  • Create TAR archive", text)
+        self.assertNotIn("Create BagIt package", text)
+        self.assertEqual(text.count("Previously completed steps will be reused automatically."), 1)
+        self.assertNotIn("bag_construct", text)
+
+    def test_confirmation_reuse_only(self):
+        plan = self.display_plan(fits="reuse")
+        text = self.g["format_run_confirmation"](plan, {})
+        self.assertIn("No steps need to run.", text)
+        self.assertIn("Previously completed steps will be reused automatically.", text)
+        self.assertNotIn("Step 2", text)
+
+    def test_confirmation_preserves_stale_and_validation_warnings(self):
+        plan = self.display_plan(fits="run", tar_serialize="block")
+        plan[ps.STAGE_IDS.index("fits")].update(reason="recorded_stale", freshness_reasons=["fits_output_changed"])
+        plan[ps.STAGE_IDS.index("tar_serialize")]["reason"] = "successful_validation_required"
+        text = self.g["format_run_confirmation"](plan, {})
+        self.assertIn("Outputs have changed; affected work will run again.", text)
+        self.assertIn("must pass validation before creating a TAR archive", text)
+        self.assertNotIn("fits_output_changed", text)
+        self.assertNotIn("integrity verification", text)
+
+    def test_confirmation_preserves_dependency_and_fixity_warnings(self):
+        plan = self.display_plan(reports="block", bag_construct="run")
+        plan[ps.STAGE_IDS.index("reports")]["reason"] = "fits_requires_review"
+        plan[ps.STAGE_IDS.index("bag_construct")]["requires_passing_fixity"] = True
+        text = self.g["format_run_confirmation"](plan, {})
+        self.assertIn("Review format identification output before continuing.", text)
+        self.assertIn("Fixity must pass before creating the BagIt package.", text)
+
+    def test_cancel_does_not_start_thread_or_lock_controls(self):
+        self.select(2)
+        with patch.object(self.g["threading"], "Thread") as thread, \
+             patch.dict(self.g, confirm_run=MagicMock(return_value=False)):
+            self.g["start_pipeline"]()
+        thread.assert_not_called()
+        self.assertFalse(self.g["inputs_locked"])
+        self.assertEqual(str(self.g["run_button"].cget("state")), "normal")
+        self.assertFalse((self.output / "A_status.json").exists())
+
+    def test_confirmation_buttons_return_run_or_cancel(self):
+        def invoke(label):
+            def visit(widget):
+                for child in widget.winfo_children():
+                    if child.winfo_class() == "TButton" and child.cget("text") == label:
+                        child.invoke()
+                        return True
+                    if visit(child):
+                        return True
+                return False
+            self.assertTrue(visit(self.g["root"]))
+
+        for label, expected in (("Run", True), ("Cancel", False)):
+            with self.subTest(button=label):
+                self.g["root"].after(0, lambda name=label: invoke(name))
+                self.assertEqual(self.g["confirm_run"]("Test confirmation"), expected)
 
     def test_new_fixity_findings_block_bagging_at_runtime(self):
         def fixity(*args):

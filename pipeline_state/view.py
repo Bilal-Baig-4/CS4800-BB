@@ -84,6 +84,10 @@ def summarize_user_steps(status):
 
     for user_step, stage in (("format_identification", "fits"), ("fixity", "fixity")):
         summaries[user_step]["label"] = stage_text(steps[stage])
+    fits = steps["fits"]
+    if (fits["state"] == "completed" and fits.get("outcome") == "processed"
+            and fits["freshness"]["state"] != "stale"):
+        summaries["format_identification"]["label"] = "Completed — Format Identification Finished"
     if (steps["reports"]["state"] == "completed" and steps["reports"].get("outcome") == "partial"
             and summaries["reports"]["label"] == "Completed"):
         summaries["reports"]["label"] = "Needs Attention — Partial Reports"

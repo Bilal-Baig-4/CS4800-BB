@@ -64,9 +64,22 @@ class StatusSummaryTests(unittest.TestCase):
             self.set("fixity", "completed", outcome)
             self.assertEqual(self.label("fixity"), f"Completed — {outcome.title()}")
 
-    def test_fits_processed_does_not_claim_identification(self):
+    def test_fits_processed_displays_format_identification_finished(self):
         self.set("fits", "completed", "processed")
-        self.assertEqual(self.label("format_identification"), "Completed — Detailed Results Unavailable")
+        before = deepcopy(self.status)
+        self.assertEqual(self.label("format_identification"), "Completed — Format Identification Finished")
+        self.assertIn("Format Identification: Completed — Detailed Results Unavailable",
+                      view.format_stage_details(self.status))
+        self.assertEqual(self.status, before)
+
+    def test_fits_processed_other_states_keep_existing_wording(self):
+        for state in ("failed", "interrupted", "running", "unknown", "not_started"):
+            self.set("fits", state, "processed")
+            self.assertEqual(self.label("format_identification"),
+                             view.STATE_LABELS[state] + " — Detailed Results Unavailable")
+        self.set("fits", "completed", "processed")
+        self.status["steps"]["fits"]["freshness"].update(state="stale", reasons=["fits_output_changed"])
+        self.assertEqual(self.label("format_identification"), "Completed — Detailed Results Unavailable — Stale")
 
     def test_bagging_construction_only_is_legitimate_completion(self):
         self.set("bag_construct", "completed", "constructed")

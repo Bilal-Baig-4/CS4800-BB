@@ -10,7 +10,7 @@ from lxml import etree as ET
 from pipeline_state.recording import RunRecorder, file_count, fixity_result
 from pipeline_state import status as pipeline_status
 from pipeline_state.view import summarize_user_steps, format_stage_details
-from pipeline_state.resume import build_resume_plan, format_execution_plan, bag_layout
+from pipeline_state.resume import build_resume_plan, bag_layout
 from pipeline_state.freshness import load_reconciled_status
 
 from pipeline import (
@@ -221,8 +221,47 @@ def clear_loaded_history(*_):
     update_history_actions()
 
 
+def select_remaining_steps(status):
+    """Suggest mandatory work from loaded status without inferring Bagging intent."""
+    groups = (
+        (run_ingest, ("ingest",)),
+        (run_format_identification, ("fits",)),
+        (run_reports, ("reports", "summary")),
+        (run_fixity_selected, ("fixity",)),
+    )
+    for variable, stages in groups:
+        variable.set(not all(status["steps"][stage]["state"] == "completed" and
+                             status["steps"][stage]["freshness"]["state"] == "current"
+                             for stage in stages))
+    # Stage history alone does not establish which optional bag operations were requested.
+    run_bagging.set(False)
+
+
+def stale_completed_warning(status):
+    """Group completed work affected by changes into the five user-facing steps."""
+    groups = (
+        ("Step 1 — Ingest", ("antivirus", "ingest")),
+        ("Step 2 — Format Identification", ("fits",)),
+        ("Step 3 — Reports", ("reports", "summary")),
+        ("Step 4 — Fixity", ("fixity",)),
+        ("Step 5 — Bagging", ("bag_construct", "bag_validate", "tar_serialize")),
+    )
+    affected = [heading for heading, stages in groups
+                if any(status["steps"][stage]["state"] == "completed" and
+                       status["steps"][stage]["freshness"]["state"] == "stale"
+                       for stage in stages)]
+    if not affected:
+        return None
+    return ("Files or processing outputs have changed since this accession was last processed.\n\n"
+            "The following completed steps may no longer be current:\n\n" +
+            "\n".join(f"• {heading}" for heading in affected) +
+            "\n\nThe mandatory processing steps that need attention have been selected.\n"
+            "Bagging remains optional; select it if needed.\n\n"
+            "Review the selections before continuing.")
+
+
 def load_accession_status(show_errors=True, expected_identity=None):
-    """Read durable history only. Never create, repair, or select processing steps."""
+    """Load durable history; suggest remaining work on a successful manual refresh."""
     global loaded_history
     output, accession = output_dir_var.get(), accession_var.get().strip()
     if expected_identity is not None and history_identity(output, accession) != expected_identity:
@@ -242,6 +281,8 @@ def load_accession_status(show_errors=True, expected_identity=None):
             messagebox.showerror("Status Load Error", str(exc))
         return
     loaded_history = status
+    if show_errors and expected_identity is None and not inputs_locked:
+        select_remaining_steps(status)
     for name, variable in step_history_vars.items():
         variable.set(summaries[name]["label"])
     history_message_var.set(f"Recorded history: {accession}")
@@ -249,6 +290,10 @@ def load_accession_status(show_errors=True, expected_identity=None):
     root.update_idletasks()
     width, height = map(int, root.geometry().split("+")[0].split("x"))
     root.geometry(f"{max(width, root.winfo_reqwidth() + 20)}x{max(height, root.winfo_reqheight() + 16)}")
+    if show_errors and expected_identity is None and not inputs_locked:
+        warning = stale_completed_warning(status)
+        if warning:
+            messagebox.showwarning("Changes Detected", warning)
 
 
 def show_status_details():
@@ -284,14 +329,125 @@ def prepare_execution_plan(options):
     return plan
 
 
+def format_run_confirmation(plan, options):
+    """Describe planned work for users without changing any decisions."""
+    groups = (
+        ("Step 1 — Ingest", ("antivirus", "ingest")),
+        ("Step 2 — Format Identification", ("fits",)),
+        ("Step 3 — Reports", ("reports", "summary")),
+        ("Step 4 — Fixity", ("fixity",)),
+        ("Step 5 — Bagging", ("bag_construct", "bag_validate", "tar_serialize")),
+    )
+    by_stage = {item["stage"]: item for item in plan}
+    labels = {
+        "antivirus": "Microsoft Defender scan",
+        "ingest": "Move files into accession" if options.get("move") else "Copy files into accession",
+        "fits": "Format identification", "reports": "Metadata reports",
+        "summary": "Collection summary", "fixity": "Fixity verification",
+        "bag_construct": "Create BagIt package", "bag_validate": "Validate BagIt package",
+        "tar_serialize": "Create TAR archive",
+    }
+    prerequisites = {
+        "ingest": "accession files and inventory", "fits": "format identification output",
+        "reports": "metadata reports", "bag_construct": "BagIt package",
+        "bag_validate": "BagIt validation",
+    }
+    warnings = {
+        "previous_attempt_may_be_interrupted": "A previous attempt may still be running or was interrupted; review it before continuing.",
+        "unknown_history": "The previous processing result is unknown; review it before continuing.",
+        "unsafe_automatic_retry": "A previous attempt did not finish safely; review the existing files before retrying.",
+        "outcome_not_satisfied": "The previous result needs attention before continuing.",
+        "completed_outputs_missing_or_ambiguous": "Previously completed outputs are missing or unclear; review them before continuing.",
+        "scan_result_not_usable": "The previous scan could not be used; review the scan results.",
+        "existing_bag_cannot_be_rebuilt": "An existing BagIt package cannot be rebuilt automatically.",
+        "ambiguous_bag_layout": "The existing package structure is unclear; review it before continuing.",
+        "existing_bag_profile_mismatch": "The existing package does not match the selected packaging profile.",
+        "unbagged_payload_required": "This work requires accession files that have not been bagged.",
+        "existing_preservation_baseline": "An accession inventory already exists; review it before ingesting again.",
+        "scan_cannot_be_reused_for_new_ingest": "A new ingest needs a new virus scan.",
+        "successful_validation_required": "The BagIt package must pass validation before creating a TAR archive.",
+        "managed_fixity_findings_require_passing_rerun": "Fixity found missing or changed files; rerun Fixity and obtain a passing result before bagging.",
+        "completed_outputs_missing": "Previously completed outputs are missing and will be recreated.",
+        "explicit_safe_rerun": "Previously completed work will run again as requested.",
+        "failed": "The previous attempt failed; this work will be retried.",
+        "interrupted": "The previous attempt was interrupted; this work will be retried.",
+    }
+    lines = ["The following steps will run:", ""]
+    attention = []
+    for heading, stages in groups:
+        entries = [by_stage[s] for s in stages if s in by_stage]
+        running = [item for item in entries if item["action"] == "run"]
+        if running:
+            lines.append(heading)
+            if len(stages) > 1:
+                lines.extend(f"  • {labels[item['stage']]}" for item in running)
+        for item in entries:
+            if item["reason"] == "not_requested":
+                continue
+            reason = item["reason"]
+            warning = warnings.get(reason)
+            if reason == "recorded_stale" or "freshness_reasons" in item:
+                stale = ("Outputs have changed; affected work will run again." if item["action"] == "run"
+                         else "Outputs have changed; review them before continuing.")
+                attention.append(f"{heading}: {labels[item['stage']]} — {stale}")
+            if reason.endswith("_requires_review"):
+                producer = reason.removesuffix("_requires_review")
+                warning = f"Review {prerequisites.get(producer, 'earlier work')} before continuing."
+            elif reason.startswith("missing_") and reason.endswith("_prerequisite"):
+                producer = reason[len("missing_"):-len("_prerequisite")]
+                warning = f"Required {prerequisites.get(producer, 'earlier outputs')} could not be found."
+            if warning is None and item["action"] in ("review", "block") and reason != "recorded_stale":
+                warning = "This work needs review before processing can start."
+            if warning:
+                attention.append(f"{heading}: {labels[item['stage']]} — {warning}")
+            if item.get("requires_passing_fixity"):
+                attention.append(f"{heading}: Fixity must pass before creating the BagIt package.")
+    if not any(item["action"] == "run" for item in plan):
+        lines = ["No steps need to run."]
+    if any(item["action"] == "reuse" for item in plan):
+        lines.extend(["", "Previously completed steps will be reused automatically."])
+    if any(all(by_stage[s]["reason"] == "not_requested" for s in stages) for _, stages in groups):
+        lines.extend(["", "Other steps will not run."])
+    if attention:
+        lines.extend(["", "Please note:", *dict.fromkeys(attention)])
+    return "\n".join(lines)
+
+
+def confirm_run(message):
+    """Modal confirmation with explicit Run and Cancel buttons."""
+    dialog = tk.Toplevel(root)
+    dialog.title("Confirm Run")
+    dialog.transient(root)
+    confirmed = False
+
+    def finish(run=False):
+        nonlocal confirmed
+        confirmed = run
+        dialog.destroy()
+
+    frame = ttk.Frame(dialog, padding=16)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=message, wraplength=580, justify="left").pack(anchor="w")
+    buttons = ttk.Frame(frame)
+    buttons.pack(anchor="e", pady=(16, 0))
+    ttk.Button(buttons, text="Run", command=lambda: finish(True)).pack(side="left", padx=(0, 8))
+    cancel = ttk.Button(buttons, text="Cancel", command=finish)
+    cancel.pack(side="left")
+    dialog.protocol("WM_DELETE_WINDOW", finish)
+    dialog.bind("<Escape>", lambda event: finish())
+    dialog.grab_set()
+    cancel.focus_set()
+    root.wait_window(dialog)
+    return confirmed
+
+
 def validate_execution_plan(options, plan):
     if not options.get("_managed_status_exists", False):
         # Keep established selective prerequisites/diagnostics for first managed runs.
         validate_selected_run(options)
     if any(item["action"] in ("review", "block") for item in plan):
-        raise ValueError(format_execution_plan(plan) + "\n\nProcessing will not start. Review the recorded history/artifacts, "
-                         "change the requested work, or explicitly rerun safe completed stages. "
-                         "Persisted running attempts require external review; they are not automatically retried.")
+        raise ValueError(format_run_confirmation(plan, options) +
+                         "\n\nProcessing will not start. Review the warnings and Status Details before continuing.")
     actions = {item["stage"]: item["action"] for item in plan}
     effective = dict(options)
     effective["steps"] = dict(ingest=actions["ingest"] == "run", fits=actions["fits"] == "run",
@@ -504,7 +660,8 @@ def start_pipeline():
         status_var.set("Processing not started; check prerequisites.")
         messagebox.showerror("Processing Prerequisites", str(exc))
         return
-    messagebox.showinfo("Execution Plan", format_execution_plan(plan))
+    if not confirm_run(format_run_confirmation(plan, options)):
+        return
     status_var.set("Starting selected processing...")
     run_button.config(state="disabled")
     set_inputs_locked(True)
