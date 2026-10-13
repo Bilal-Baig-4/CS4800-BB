@@ -31,22 +31,22 @@ The Pipeline still transfers files and builds XML in Python. FITS supplies
 optional identification metadata; DataAccessioner itself is not launched.
 Nothing downloads or installs FITS automatically.
 
-The repository includes FITS 1.6.0 at tools/fits-1.6.0. Keep that directory
-inside the tools folder next to pipeline.py, as supplied by the repository. With Java
+The repository includes FITS 1.6.0 at fits/tools/fits-1.6.0. Keep the fits folder
+next to pipeline.py, as supplied by the repository. With Java
 available, launch the GUI normally; FITS_HOME is not required. Discovery is
 relative to pipeline.py, so launching from another working directory also works.
 Java is still a separate prerequisite; it is not bundled.
 
-The Pipeline selects config/fits-droid.xml with FITS's -f option. Only DROID
+The Pipeline selects fits/config/fits-droid.xml with FITS's -f option. Only DROID
 runs, providing PRONOM/PUID identification. Python retains MD5, size and transfer
-responsibilities. Keep this profile with pipeline.py. All other FITS tools and
+responsibilities. Keep this profile under fits/config/. All other FITS tools and
 the original xml/fits.xml remain bundled for future re-enablement; see
-FITS-droid-only.md. Launching fits.bat without -f still uses the full vendor profile.
+fits/FITS-configuration.md. Launching fits.bat without -f still uses the full vendor profile.
 
 For a complete repository checkout, follow step 1 below, then run `py GUI.py`.
 Steps 2-4 describe an optional external FITS installation/override. To run the
 direct diagnostic commands in steps 5-6 against the bundled copy, first set
-`$env:FITS_HOME = (Resolve-Path .\tools\fits-1.6.0).Path` from the repository.
+`$env:FITS_HOME = (Resolve-Path .\fits\tools\fits-1.6.0).Path` from the repository.
 This variable is for those diagnostic commands, not required by normal GUI runs.
 
 Windows setup
@@ -113,7 +113,7 @@ Windows setup
    $sampleFile = (Resolve-Path "C:\path\to\sample.pdf").Path
    $fitsReport = Join-Path $env:TEMP 'pipeline-fits-sample.xml'
    # Run from the repository root before changing directories:
-   $fitsProfile = (Resolve-Path .\config\fits-droid.xml).Path
+   $fitsProfile = (Resolve-Path .\fits\config\fits-droid.xml).Path
    Push-Location $env:FITS_HOME
    try {
        & .\fits.bat -f $fitsProfile -i $sampleFile -o $fitsReport
@@ -160,7 +160,7 @@ Windows setup
 
 Configuration and log reference
 
-- Precedence: Python fits_home argument, then FITS_HOME, then tools/fits-1.6.0
+- Precedence: Python fits_home argument, then FITS_HOME, then fits/tools/fits-1.6.0
   relative to pipeline.py, then fits.bat (Windows) or fits.sh (other systems)
   found on PATH. No recursive directory discovery.
   An invalid explicit path is reported instead of silently using another install.

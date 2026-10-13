@@ -10,7 +10,7 @@ The project builds on Data Accessioner-style ingest, FITS/DROID format identific
 - FITS and Java for format identification; FITS is included in the repository.
 - Microsoft Defender on supported Windows systems for optional virus scanning.
 
-See [installation instructions](installation) and [Python library requirements](setup.md) for setup details. [FITS/DROID notes](FITS-droid-only.md) describe the supplied identification configuration.
+See [installation instructions](installation) and [Python library requirements](setup.md) for setup details. [FITS configuration](fits/FITS-configuration.md) describes the supplied identification configuration.
 
 ## Running the Pipeline
 

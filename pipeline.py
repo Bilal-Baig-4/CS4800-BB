@@ -277,7 +277,7 @@ def run_antivirus_scan(data_directory, output_folder, accession_number, result_c
 
 PREMIS_NS = "info:lc/xmlns/premis-v2"
 FITS_NS = "http://hul.harvard.edu/ois/xml/ns/fits/fits_output"
-FITS_PROFILE = Path(__file__).resolve().parent / "config" / "fits-droid.xml"
+FITS_PROFILE = Path(__file__).resolve().parent / "fits" / "config" / "fits-droid.xml"
 
 
 def configure_fits(fits_home=None):
@@ -290,14 +290,14 @@ def configure_fits(fits_home=None):
     configured = fits_home or os.environ.get("FITS_HOME", "").strip()
     try:
         if not configured:
-            bundled = Path(__file__).resolve().parent / "tools" / "fits-1.6.0"
+            bundled = Path(__file__).resolve().parent / "fits" / "tools" / "fits-1.6.0"
             if bundled.is_dir():
                 configured = bundled
         if not configured:
             launcher_on_path = shutil.which(launcher_name)
             if not launcher_on_path:
                 unavailable("NOT_CONFIGURED", "Set FITS_HOME to the extracted FITS directory, "
-                            "restore tools/fits-1.6.0, or add its launcher directory to PATH.")
+                            "restore fits/tools/fits-1.6.0, or add its launcher directory to PATH.")
                 return None
             configured = Path(launcher_on_path).parent
         home = Path(configured).expanduser().resolve()

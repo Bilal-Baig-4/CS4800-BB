@@ -262,7 +262,7 @@ class PremisTests(unittest.TestCase):
         self.assertIsNone(tools[0].get("exclude-exts"))
         self.assertIsNone(tools[0].get("include-exts"))
         self.assertEqual(profile.findtext("output/enable-checksum"), "false")
-        self.assertGreater(len(ET.parse(str(ROOT / "tools/fits-1.6.0/xml/fits.xml"))
+        self.assertGreater(len(ET.parse(str(ROOT / "fits/tools/fits-1.6.0/xml/fits.xml"))
                                .findall("tools/tool")), 1)
 
     def test_missing_profile_never_falls_back_to_full_fits(self):
@@ -310,7 +310,7 @@ class FitsConfigurationTests(unittest.TestCase):
         self.addCleanup(module_path.stop)
 
     def make_bundle(self):
-        bundled = self.home / "tools/fits-1.6.0"
+        bundled = self.home / "fits/tools/fits-1.6.0"
         (bundled / "lib").mkdir(parents=True)
         (bundled / self.launcher.name).touch()
         (bundled / "lib/fits.jar").touch()
@@ -340,7 +340,7 @@ class FitsConfigurationTests(unittest.TestCase):
 
     def test_invalid_bundle_is_nonfatal_and_not_silently_replaced(self):
         # A directory exists but its launcher is missing: report it, do not use PATH.
-        (self.home / "tools/fits-1.6.0").mkdir(parents=True)
+        (self.home / "fits/tools/fits-1.6.0").mkdir(parents=True)
         source = self.home / "source"
         source.mkdir()
         (source / "sample.pdf").write_bytes(pdf_bytes())
