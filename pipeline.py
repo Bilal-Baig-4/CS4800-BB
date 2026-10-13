@@ -130,10 +130,12 @@ def compute_md5(file_path, chunk_size=1024 * 1024):
 # ANTIVIRUS SCANNER
 # ==========================
 
-def run_antivirus_scan(data_directory, output_folder, accession_number):
+def run_antivirus_scan(data_directory, output_folder, accession_number, result_callback=None):
     """Scan sequentially with Defender, returning transferable paths, detections,
     and whether antivirus verification was unavailable. Only detections are
     excluded; scan errors and cloud placeholders remain transferable.
+    Optional result_callback receives this attempt's counts/outcome and only
+    successfully written report paths; the existing return tuple is unchanged.
     """
     data_directory = Path(data_directory)
     output_folder = Path(output_folder)
@@ -147,6 +149,9 @@ def run_antivirus_scan(data_directory, output_folder, accession_number):
                 "Microsoft Defender executable was found, but Defender Antivirus is not operational. "
                 "Antivirus scan skipped."
             )
+        if result_callback is not None:
+            result_callback(dict(state="failed", outcome="unavailable", scanned_count=0,
+                                 detection_count=0, error_count=None, outputs={}))
         return set(all_files), {}, True
 
     logging.info("Microsoft Defender executable: %s", defender_path)
@@ -229,6 +234,7 @@ def run_antivirus_scan(data_directory, output_folder, accession_number):
     )
     av_csv_file = output_folder / f"antivirus_{accession_number}.csv"
     av_log_file = output_folder / f"antivirus_{accession_number}.log"
+    written_outputs = {}
     try:
         output_folder.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -238,10 +244,12 @@ def run_antivirus_scan(data_directory, output_folder, accession_number):
             writer = csv.DictWriter(f, fieldnames=["file_path", "status", "threat", "return_code"])
             writer.writeheader()
             writer.writerows(results)
+        written_outputs["csv"] = av_csv_file
     except OSError:
         logging.exception("Could not write Microsoft Defender CSV: %s", av_csv_file)
     try:
         av_log_file.write_text(header + "\n".join(file_logs), encoding="utf-8")
+        written_outputs["log"] = av_log_file
     except OSError:
         logging.exception("Could not write Microsoft Defender log: %s", av_log_file)
         # Preserve the scan evidence in the pipeline log if the AV log fails.
@@ -252,6 +260,14 @@ def run_antivirus_scan(data_directory, output_folder, accession_number):
     av_skipped = scan_candidates > 0 and (scanned == 0 or service_unavailable == scanned)
     if av_skipped:
         logging.warning("Microsoft Defender verification unavailable. Pipeline will continue without antivirus scanning.")
+    if result_callback is not None:
+        outcome = ("unavailable" if av_skipped else "empty" if not all_files else
+                   "detections" if infected_files else "partial" if
+                   counts["SCAN_ERROR"] or counts["SKIPPED_CLOUD_NATIVE"] else "clean")
+        result_callback(dict(state="failed" if av_skipped else "completed", outcome=outcome,
+                             scanned_count=scanned, detection_count=len(infected_files),
+                             error_count=counts["SCAN_ERROR"],
+                             skipped_count=counts["SKIPPED_CLOUD_NATIVE"], outputs=written_outputs))
     return clean_files, infected_files, av_skipped
 
 
@@ -969,20 +985,31 @@ def create_bag(accession_folder, accession_number, contact_name="", contact_emai
     return bag_root, tar_path, bag_valid, bag_error
 
 
-def validate_bag(bag_path):
+def validate_bag(bag_path, result_callback=None):
     """
     Validate an existing BagIt bag directory.
     Returns (is_valid: bool, error_message: str).
+    Optional result_callback distinguishes invalid findings from execution or
+    dependency errors without changing the legacy two-value return contract.
     """
     if not BAGIT_AVAILABLE:
+        if result_callback is not None:
+            result_callback(dict(state="failed", outcome="indeterminate", valid=None,
+                                 message="bagit-python is not installed."))
         return False, "bagit-python is not installed."
     try:
         bag = bagit.Bag(str(bag_path))
         bag.validate()
+        if result_callback is not None:
+            result_callback(dict(state="completed", outcome="valid", valid=True))
         return True, ""
     except bagit.BagValidationError as exc:
+        if result_callback is not None:
+            result_callback(dict(state="completed", outcome="invalid", valid=False, message=str(exc)))
         return False, str(exc)
     except Exception as exc:
+        if result_callback is not None:
+            result_callback(dict(state="failed", outcome="indeterminate", valid=None, message=str(exc)))
         return False, str(exc)
 
 

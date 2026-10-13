@@ -3,6 +3,7 @@ Archives Pipeline Installation
 1. Clone the GitHub repository or download the following files:
    - GUI.py
    - pipeline.py
+   - pipeline_state/ (the entire package)
    - files.csv.xslt
    - files.html.xslt
 
@@ -20,7 +21,7 @@ Archives Pipeline Installation
    py GUI.py
 
 Notes:
-- GUI.py, pipeline.py, and both XSLT files should remain in the same folder.
+- GUI.py, pipeline.py, pipeline_state/, and both XSLT files should remain in the same folder.
 - BagIt is optional, but it is required if you want to use the BagIt packaging step.
 - If the `python` command does not work on Windows, use `py` instead.
 

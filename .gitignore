@@ -1,6 +1,8 @@
 .venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+venv/
 verification-output/
 .vscode/
 *.log

@@ -1,5 +1,9 @@
 # Missing PREMIS metadata: diagnosis and verification
 
+This is a historical research/verification record of the initial PREMIS work.
+Its workflow descriptions and test counts describe that phase; consult README.md
+and installation for the current application and setup.
+
 The Pipeline never invoked DataAccessioner. `README.md` explicitly says this
 project mimics the programs. `GUI.py::run_pipeline` calls the Python function
 `pipeline.py::generate_data_accessioner_xml`, which copies/moves files, hashes
