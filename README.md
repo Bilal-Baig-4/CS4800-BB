@@ -1,43 +1,62 @@
 # Archives Pipeline
 
-Archives Pipeline transfers accession files, identifies file formats, creates metadata reports, verifies fixity, and optionally packages collections for preservation. The GUI lets users select the processing steps they need and continue an accession later.
+Automation for Data Accessioner, FITS, XSLTProcessor, hashlib, Microsoft Defender, and DART.
 
-The project builds on Data Accessioner-style ingest, FITS/DROID format identification, XSLT reporting, Python's hashlib for fixity, Microsoft Defender scanning, and APTrust's Digital Archivist's Resource Tool (DART)-style BagIt packaging.
+## Data Accessioner
+- Transfers files from disks onto a file server
+- Output: XML file and the full directory from the input
+- How the function works:
+    - Recursively copies or moves files from the input directory
+    - Preserves the original file timestamps
+    - Generates an XML report
+    - Recreates the full directory structure from the input directory
+- Sample output:
+  <img width="1575" height="637" alt="Screenshot 2025-12-08 131822" src="https://github.com/user-attachments/assets/29061578-5ba5-47dd-8a93-fface00b151b" />
 
-## Requirements / Installation
 
-- Python with the required packages; BagIt support is needed for optional packaging.
-- FITS and Java for format identification; FITS is included in the repository.
-- Microsoft Defender on supported Windows systems for optional virus scanning.
+## FITS
+- Identifies file formats and extracts technical metadata
+- Uses the bundled FITS 1.6.0 distribution with the project's DROID-focused configuration
+- Records PRONOM/PUID format identification when available
 
-See [installation instructions](installation) and [Python library requirements](setup.md) for setup details. [FITS configuration](fits/FITS-configuration.md) describes the supplied identification configuration.
 
-## Running the Pipeline
+## XSLT Processor
+- Parses the XML report from the accession process
+- Output: CSV and HTML reports
+- How the function works:
+    - Transforms the XML report into CSV and HTML reports
+- Sample output
+    - CSV:
+      <img width="1772" height="324" alt="Screenshot 2025-12-08 131338" src="https://github.com/user-attachments/assets/b239666f-0293-4726-b61a-8691ff9fb6c1" />
 
-From the project folder, run:
+    - HTML:
+      <img width="971" height="691" alt="Screenshot 2025-12-08 131635" src="https://github.com/user-attachments/assets/5a1a1d4b-b57a-470d-8ebb-58ef80b411c2" />
 
-```sh
-py GUI.py
-```
 
-Choose an input folder, output folder, and accession name, select the desired steps and options, then click **Run Selected Steps**. To continue an existing accession, use its output folder and accession name, then **Load / Refresh Status**.
+## Fixity Verification
+- Uses Python's `hashlib` to validate file checksums against the accession metadata
+- Output: CSV and log report
+- How the function works:
+    - Recomputes MD5 checksums for all files in the accession
+    - Compares the recomputed checksum to the stored checksum
+    - Flags MISSING, MISMATCH, or ERROR (OK if they match)
+- Sample output
+    - CSV:
+      <img width="1725" height="296" alt="Screenshot 2025-12-08 132042" src="https://github.com/user-attachments/assets/5d8979f0-9566-40ac-a520-ea1b2388d696" />
 
-## Processing Steps
+    - Log:
+      <img width="1856" height="466" alt="Screenshot 2025-12-08 132132" src="https://github.com/user-attachments/assets/c4ef74c0-e006-4ced-b952-62ab97164c75" />
 
-1. **Ingest:** Optionally scan with Microsoft Defender, then copy or move accession files while preserving their directory structure and timestamps.
-2. **Format Identification:** Use FITS to identify file formats.
-3. **Reports:** Create CSV/HTML metadata reports and a collection summary.
-4. **Fixity:** Verify file checksums and report missing or changed files.
-5. **Bagging:** Optionally create a BagIt package, validate it, and produce an APTrust TAR archive where selected.
+
+## Virus scanning
+- Uses Microsoft Defender for an optional antivirus scan before ingest.
+
+
+## Bagging function (optional)
+- Bundles files and metadata into a BagIt package.
+- Bag validation and TAR serialization can also be run when needed.
+
 
 ## Resume / Status
-
-Processing progress is stored in an accession status file so users can reopen an accession and continue later. Completed work can be reused when appropriate; changed outputs may be marked stale and rerun.
-
-## Output
-
-Outputs may include accession XML, CSV/HTML metadata reports, a collection summary, a fixity report, and BagIt/TAR output when selected.
-
-## Tests / Development
-
-The project includes automated tests for processing, status tracking, resume behavior, and packaging.
+- Processing steps can be selected and run separately.
+- The pipeline keeps a status file so users can return later and continue unfinished processing.
