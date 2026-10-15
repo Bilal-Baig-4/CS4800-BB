@@ -2,6 +2,7 @@ Installation
 
 1. Download the project files:
    - GUI.py
+   - gui_preferences.py
    - pipeline.py
    - pipeline_state/
    - fits/

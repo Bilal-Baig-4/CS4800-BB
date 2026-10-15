@@ -308,6 +308,73 @@ class ResumeExecutionTests(unittest.TestCase):
         self.assertIn("Previously completed steps will be reused automatically.", text)
         self.assertNotIn("Step 2", text)
 
+    def test_bagged_fits_and_fixity_show_working_copy_prerequisite(self):
+        self.existing_bag()
+        self.seed("fits", "processed", {"xml": "A.xml"})
+        self.g["rerun_completed_var"].set(True)
+        for step, stage, heading in ((2, "fits", "Step 2 — Format Identification"),
+                                     (4, "fixity", "Step 4 — Fixity")):
+            with self.subTest(step=step):
+                self.select(step)
+                options = self.g["selected_run_options"]()
+                plan = self.g["prepare_execution_plan"](options)
+                before = deepcopy(plan)
+                status_bytes = (self.output / "A_status.json").read_bytes()
+                text = self.g["format_run_confirmation"](plan, options)
+                self.assertIn("already been packaged as a BagIt bag", text)
+                self.assertIn("• " + heading, text)
+                self.assertEqual(text.count("requires an unbagged working accession"), 1)
+                self.assertIn("use an unbagged working copy", text)
+                self.assertNotIn("No steps need to run", text)
+                self.assertEqual(plan, before)
+                decision = next(item for item in plan if item["stage"] == stage)
+                self.assertEqual((decision["action"], decision["reason"]), ("block", "unbagged_payload_required"))
+                with patch.object(self.g["threading"], "Thread") as thread:
+                    self.g["start_pipeline"]()
+                thread.assert_not_called()
+                self.assertEqual(self.messages.showerror.call_args.args[0], "Processing Cannot Start")
+                self.assertEqual((self.output / "A_status.json").read_bytes(), status_bytes)
+
+    def test_bagged_fits_reports_dependency_explained_once(self):
+        self.existing_bag()
+        self.seed("fits", "processed", {"xml": "A.xml"})
+        self.g["rerun_completed_var"].set(True)
+        self.select(2, 3, 4)
+        options = self.g["selected_run_options"]()
+        plan = self.g["prepare_execution_plan"](options)
+        text = self.g["format_run_confirmation"](plan, options)
+        self.assertIn("• Step 2 — Format Identification", text)
+        self.assertIn("• Step 4 — Fixity", text)
+        self.assertEqual(text.count("Step 3 — Reports cannot proceed"), 1)
+        self.assertIn("Reports can still be regenerated separately from the saved metadata", text)
+        for hidden in ("No steps need to run", "Collection summary", "fits_requires_review",
+                       "reports_requires_review", "Review metadata reports", "This work requires accession files"):
+            self.assertNotIn(hidden, text)
+        actions = {item["stage"]: item["action"] for item in plan}
+        self.assertTrue(all(actions[stage] == "block" for stage in ("fits", "reports", "summary", "fixity")))
+
+    def test_reports_alone_remain_allowed_on_bagged_accession(self):
+        self.existing_bag()
+        self.seed("fits", "processed", {"xml": "A.xml"})
+        self.g["rerun_completed_var"].set(True)
+        self.select(3)
+        options = self.g["selected_run_options"]()
+        plan = self.g["prepare_execution_plan"](options)
+        self.g["validate_execution_plan"](options, plan)
+        text = self.g["format_run_confirmation"](plan, options)
+        self.assertIn("Step 3 — Reports", text)
+        self.assertNotIn("unbagged working accession", text)
+        self.execute(3)
+        self.assertOperations("run_xslt_processor", "run_xslt_processor", "generate_summary_report")
+
+    def test_review_or_block_without_running_work_is_not_reuse_only(self):
+        for action in ("review", "block"):
+            plan = self.display_plan(fits=action)
+            plan[ps.STAGE_IDS.index("fits")]["reason"] = "unknown_history"
+            text = self.g["format_run_confirmation"](plan, {})
+            self.assertNotIn("No steps need to run", text)
+            self.assertIn("Selected processing cannot start", text)
+
     def test_confirmation_preserves_stale_and_validation_warnings(self):
         plan = self.display_plan(fits="run", tar_serialize="block")
         plan[ps.STAGE_IDS.index("fits")].update(reason="recorded_stale", freshness_reasons=["fits_output_changed"])

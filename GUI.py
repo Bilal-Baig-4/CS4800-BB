@@ -7,6 +7,7 @@ import traceback
 import re
 from datetime import datetime
 from lxml import etree as ET
+from gui_preferences import load_defaults, save_default
 from pipeline_state.recording import RunRecorder, file_count, fixity_result
 from pipeline_state import status as pipeline_status
 from pipeline_state.view import summarize_user_steps, format_stage_details
@@ -42,6 +43,8 @@ def set_inputs_locked(locked: bool):
     """
     global inputs_locked
     inputs_locked = locked
+    if locked:
+        cancel_status_refresh()
     for widget in lockable_inputs:
         try:
             if isinstance(widget, ttk.Combobox):
@@ -260,9 +263,11 @@ def stale_completed_warning(status):
             "Review the selections before continuing.")
 
 
-def load_accession_status(show_errors=True, expected_identity=None):
+def load_accession_status(show_errors=True, expected_identity=None, *, update_selections=False):
     """Load durable history; suggest remaining work on a successful manual refresh."""
     global loaded_history
+    if show_errors and expected_identity is None:
+        cancel_status_refresh()
     output, accession = output_dir_var.get(), accession_var.get().strip()
     if expected_identity is not None and history_identity(output, accession) != expected_identity:
         return  # A queued refresh must not display results for a different accession.
@@ -281,7 +286,7 @@ def load_accession_status(show_errors=True, expected_identity=None):
             messagebox.showerror("Status Load Error", str(exc))
         return
     loaded_history = status
-    if show_errors and expected_identity is None and not inputs_locked:
+    if (update_selections or (show_errors and expected_identity is None)) and not inputs_locked:
         select_remaining_steps(status)
     for name, variable in step_history_vars.items():
         variable.set(summaries[name]["label"])
@@ -294,6 +299,45 @@ def load_accession_status(show_errors=True, expected_identity=None):
         warning = stale_completed_warning(status)
         if warning:
             messagebox.showwarning("Changes Detected", warning)
+
+
+def cancel_status_refresh():
+    global pending_status_refresh
+    if pending_status_refresh is not None:
+        root.after_cancel(pending_status_refresh)
+        pending_status_refresh = None
+
+
+def auto_refresh_status(expected_identity=None):
+    cancel_status_refresh()
+    if inputs_locked:
+        return
+    identity = history_identity(output_dir_var.get(), accession_var.get())
+    if expected_identity is not None and expected_identity != identity:
+        return
+    if not identity[0].strip() or not identity[1]:
+        return
+    # Reuse reconciliation and selection rules, but keep typing free of dialogs.
+    load_accession_status(False, identity, update_selections=True)
+
+
+def schedule_status_refresh(*_):
+    global pending_status_refresh
+    cancel_status_refresh()
+    clear_loaded_history()
+    if not inputs_locked and output_dir_var.get().strip() and accession_var.get().strip():
+        identity = history_identity(output_dir_var.get(), accession_var.get())
+        pending_status_refresh = root.after(600, auto_refresh_status, identity)
+
+
+def save_directory_default(kind):
+    variable = input_dir_var if kind == "input" else output_dir_var
+    try:
+        save_default(kind, variable.get())
+    except (OSError, ValueError) as exc:
+        messagebox.showerror("Default Directory Not Saved", str(exc))
+        return
+    status_var.set(f"Default {kind} directory saved.")
 
 
 def show_status_details():
@@ -339,6 +383,13 @@ def format_run_confirmation(plan, options):
         ("Step 5 — Bagging", ("bag_construct", "bag_validate", "tar_serialize")),
     )
     by_stage = {item["stage"]: item for item in plan}
+    unbagged = {item["stage"] for item in plan if item["reason"] == "unbagged_payload_required"}
+    dependent_reports = ("fits" in unbagged and by_stage["reports"]["reason"] == "fits_requires_review")
+    grouped_warnings = set(unbagged)
+    if dependent_reports:
+        grouped_warnings.add("reports")
+        if by_stage["summary"]["reason"] == "reports_requires_review":
+            grouped_warnings.add("summary")
     labels = {
         "antivirus": "Microsoft Defender scan",
         "ingest": "Move files into accession" if options.get("move") else "Copy files into accession",
@@ -382,7 +433,7 @@ def format_run_confirmation(plan, options):
             if len(stages) > 1:
                 lines.extend(f"  • {labels[item['stage']]}" for item in running)
         for item in entries:
-            if item["reason"] == "not_requested":
+            if item["reason"] == "not_requested" or item["stage"] in grouped_warnings:
                 continue
             reason = item["reason"]
             warning = warnings.get(reason)
@@ -402,11 +453,27 @@ def format_run_confirmation(plan, options):
                 attention.append(f"{heading}: {labels[item['stage']]} — {warning}")
             if item.get("requires_passing_fixity"):
                 attention.append(f"{heading}: Fixity must pass before creating the BagIt package.")
-    if not any(item["action"] == "run" for item in plan):
+    blocked = any(item["action"] in ("review", "block") for item in plan)
+    if unbagged:
+        packaged = (options.get("output") and options.get("accession") and
+                    bag_layout(Path(options["output"]) / options["accession"]) == "bagged")
+        lines = ["This accession has already been packaged as a BagIt bag." if packaged else
+                 "The accession is not in a usable unbagged working layout.", "",
+                 "The following selected processing requires an unbagged working accession:", ""]
+        lines.extend(f"• {heading}" for heading, stages in groups if unbagged.intersection(stages))
+        if dependent_reports:
+            lines.extend(["", "Step 3 — Reports cannot proceed because Step 2 — Format Identification is also selected and cannot proceed."])
+        lines.extend(["", "To reprocess these steps, use an unbagged working copy of the accession.", "",
+                      "Reports can still be regenerated separately from the saved metadata when their blocked dependencies are not selected."])
+    elif blocked:
+        lines = ["Selected processing cannot start. Review the prerequisites below."]
+    elif not any(item["action"] == "run" for item in plan) and any(item["action"] == "reuse" for item in plan):
         lines = ["No steps need to run."]
-    if any(item["action"] == "reuse" for item in plan):
+    elif not any(item["action"] == "run" for item in plan):
+        lines = ["No processing steps are selected to run."]
+    if not blocked and any(item["action"] == "reuse" for item in plan):
         lines.extend(["", "Previously completed steps will be reused automatically."])
-    if any(all(by_stage[s]["reason"] == "not_requested" for s in stages) for _, stages in groups):
+    if not blocked and any(all(by_stage[s]["reason"] == "not_requested" for s in stages) for _, stages in groups):
         lines.extend(["", "Other steps will not run."])
     if attention:
         lines.extend(["", "Please note:", *dict.fromkeys(attention)])
@@ -652,13 +719,14 @@ def run_pipeline(options=None, plan=None):
 
 
 def start_pipeline():
+    cancel_status_refresh()
     options = selected_run_options()
     try:
         plan = prepare_execution_plan(options)
         validate_execution_plan(options, plan)
     except (ValueError, OSError) as exc:
         status_var.set("Processing not started; check prerequisites.")
-        messagebox.showerror("Processing Prerequisites", str(exc))
+        messagebox.showerror("Processing Cannot Start", str(exc))
         return
     if not confirm_run(format_run_confirmation(plan, options)):
         return
@@ -712,8 +780,9 @@ root.title("Archival Pipeline")
 root.geometry("700x820")
 root.resizable(False, False)
 
-input_dir_var    = tk.StringVar()
-output_dir_var   = tk.StringVar()
+directory_defaults = load_defaults()
+input_dir_var    = tk.StringVar(value=directory_defaults.get("input", ""))
+output_dir_var   = tk.StringVar(value=directory_defaults.get("output", ""))
 accession_var    = tk.StringVar()
 move_var         = tk.BooleanVar()
 av_var           = tk.BooleanVar(value=AV_AVAILABLE)
@@ -727,6 +796,7 @@ rerun_completed_var = tk.BooleanVar(value=False)
 inputs_locked = False
 loaded_history = None
 details_window = None
+pending_status_refresh = None
 step_history_vars = {name: tk.StringVar(value="Not Loaded") for name in
                      ("ingest", "format_identification", "reports", "fixity", "bagging")}
 history_message_var = tk.StringVar(value="Status not loaded")
@@ -756,6 +826,8 @@ ent_input.grid(row=0, column=1, **pad)
 btn_input = tk.Button(root, text="Browse",
                       command=lambda: input_dir_var.set(filedialog.askdirectory()))
 btn_input.grid(row=0, column=2, padx=5)
+btn_default_input = tk.Button(root, text="Save Default", command=lambda: save_directory_default("input"))
+btn_default_input.grid(row=0, column=3, padx=(0, 10))
 
 # Output Directory
 tk.Label(root, text="Output Directory:").grid(row=1, column=0, sticky="e", **pad)
@@ -764,6 +836,8 @@ ent_output.grid(row=1, column=1, **pad)
 btn_output = tk.Button(root, text="Browse",
                        command=lambda: output_dir_var.set(filedialog.askdirectory()))
 btn_output.grid(row=1, column=2, padx=5)
+btn_default_output = tk.Button(root, text="Save Default", command=lambda: save_directory_default("output"))
+btn_default_output.grid(row=1, column=3, padx=(0, 10))
 
 # Accession Number
 tk.Label(root, text="Accession Number:").grid(row=2, column=0, sticky="e", **pad)
@@ -893,8 +967,8 @@ aptrust_only_widgets.append(lbl_req)
 
 # ---- Lockable inputs (disabled during pipeline run) ----
 lockable_inputs = [
-    ent_input, btn_input,
-    ent_output, btn_output,
+    ent_input, btn_input, btn_default_input,
+    ent_output, btn_output, btn_default_output,
     ent_accession,
     chk_move, chk_av, chk_ingest, chk_format, chk_reports, chk_fixity, chk_bag,
     rb_aptrust, rb_generic,
@@ -914,8 +988,10 @@ status_details_button.grid(row=0, column=1, sticky="w", padx=6)
 tk.Label(history_frame, textvariable=history_message_var, anchor="w", justify="left",
          wraplength=330, font=("TkDefaultFont", 8)).grid(row=0, column=2, sticky="w")
 lockable_inputs += [refresh_status_button, status_details_button]
-output_dir_var.trace_add("write", clear_loaded_history)
-accession_var.trace_add("write", clear_loaded_history)
+output_dir_var.trace_add("write", schedule_status_refresh)
+accession_var.trace_add("write", schedule_status_refresh)
+ent_accession.bind("<Return>", lambda event: auto_refresh_status())
+ent_output.bind("<Return>", lambda event: auto_refresh_status())
 
 bag_controls = [rb_aptrust, rb_generic, ent_source_org, ent_contact_name,
                 ent_contact_email, ent_title, cmb_access, cmb_storage,
