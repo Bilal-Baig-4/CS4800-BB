@@ -1,5 +1,6 @@
 """Local directory preferences and debounced status loading; no processing changes."""
 import json
+import os
 from pathlib import Path
 import runpy
 import tempfile
@@ -7,52 +8,53 @@ import tkinter as tk
 import unittest
 from unittest.mock import patch
 
-import gui_preferences as preferences
 from pipeline_state import status as ps
 import test_gui_selective as fixture
 from test_gui_steps import GUI_PATH, SELECTIONS
 
 
 class PreferenceTests(unittest.TestCase):
+    setUpClass = classmethod(fixture.SelectiveExecutionTests.setUpClass.__func__)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name)
-        self.path = self.base / "preferences" / "settings.json"
-        override = patch.object(preferences, "settings_path", return_value=self.path)
+        self.path = self.base / "ArchivesPipeline" / "settings.json"
+        override = patch.dict(os.environ, LOCALAPPDATA=str(self.base))
         override.start()
         self.addCleanup(override.stop)
 
     def test_missing_settings(self):
-        self.assertEqual(preferences.load_defaults(), {})
+        self.assertEqual(self.g["load_defaults"](), {})
         self.assertFalse(self.path.exists())
 
     def test_malformed_settings(self):
         self.path.parent.mkdir()
         for text in ("{broken", "[]", "null", '{"input": 42, "output": false}'):
             self.path.write_text(text)
-            self.assertEqual(preferences.load_defaults(), {})
+            self.assertEqual(self.g["load_defaults"](), {})
 
     def test_nonexistent_paths_ignored(self):
         self.path.parent.mkdir()
         self.path.write_text(json.dumps(dict(input=str(self.base / "absent"), output=str(self.base))))
-        self.assertEqual(preferences.load_defaults(), dict(output=str(self.base.resolve())))
+        self.assertEqual(self.g["load_defaults"](), dict(output=str(self.base.resolve())))
 
     def test_save_each_default_preserves_other(self):
-        preferences.save_default("input", str(self.base))
-        preferences.save_default("output", str(self.path.parent))
-        self.assertEqual(preferences.load_defaults(), dict(input=str(self.base.resolve()),
+        self.g["save_default"]("input", str(self.base))
+        self.g["save_default"]("output", str(self.path.parent))
+        self.assertEqual(self.g["load_defaults"](), dict(input=str(self.base.resolve()),
                                                           output=str(self.path.parent.resolve())))
         before = self.path.read_bytes()
         with self.assertRaises(ValueError):
-            preferences.save_default("input", str(self.base / "absent"))
+            self.g["save_default"]("input", str(self.base / "absent"))
         self.assertEqual(before, self.path.read_bytes())
 
     def test_startup_restores_saved_defaults_and_safe_fallbacks(self):
-        preferences.save_default("input", str(self.base))
-        preferences.save_default("output", str(self.path.parent))
+        self.g["save_default"]("input", str(self.base))
+        self.g["save_default"]("output", str(self.path.parent))
         original_tk = tk.Tk
-        for content, expected in ((self.path.read_text(), preferences.load_defaults()),
+        for content, expected in ((self.path.read_text(), self.g["load_defaults"]()),
                                   ("{broken", {}), (None, {})):
             with self.subTest(content=content):
                 if content is None:
@@ -168,11 +170,11 @@ class AutoStatusTests(unittest.TestCase):
 
     def test_save_buttons_use_local_preferences_and_handle_errors(self):
         path = self.base / "local-settings" / "settings.json"
-        with patch.object(preferences, "settings_path", return_value=path):
+        with patch.dict(self.g, settings_path=lambda: path):
             self.g["input_dir_var"].set(str(self.source))
             self.g["btn_default_input"].invoke()
             self.g["btn_default_output"].invoke()
-            self.assertEqual(preferences.load_defaults(), dict(input=str(self.source.resolve()),
+            self.assertEqual(self.g["load_defaults"](), dict(input=str(self.source.resolve()),
                                                               output=str(self.output.resolve())))
             self.g["input_dir_var"].set(str(self.base / "absent"))
             self.g["btn_default_input"].invoke()
