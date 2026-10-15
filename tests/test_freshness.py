@@ -8,11 +8,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pipeline_state import status as ps
-from pipeline_state.recording import RunRecorder
-from pipeline_state import freshness as fresh
-from pipeline_state.resume import build_resume_plan, format_execution_plan
-from pipeline_state.view import summarize_user_steps, format_stage_details
+import pipeline_state as ps
+from pipeline_state import RunRecorder
+import pipeline_state as fresh
+from pipeline_state import build_resume_plan, format_execution_plan
+from pipeline_state import summarize_user_steps, format_stage_details
 import test_gui_selective as fixture
 
 

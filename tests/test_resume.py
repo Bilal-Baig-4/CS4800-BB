@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from pipeline_state import status as ps
-from pipeline_state.resume import build_resume_plan, format_execution_plan
+import pipeline_state as ps
+from pipeline_state import build_resume_plan, format_execution_plan
 import test_gui_selective as fixture
 
 

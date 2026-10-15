@@ -3,7 +3,7 @@ Installation
 1. Download the project files:
    - GUI.py
    - pipeline.py
-   - pipeline_state/
+   - pipeline_state.py
    - fits/
    - files.html.xslt
    - files.csv.xslt

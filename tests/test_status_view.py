@@ -2,7 +2,7 @@
 from copy import deepcopy
 import unittest
 
-from pipeline_state import view as view
+import pipeline_state as view
 
 
 def record():

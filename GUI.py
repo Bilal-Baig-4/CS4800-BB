@@ -10,11 +10,11 @@ import os
 import tempfile
 from datetime import datetime
 from lxml import etree as ET
-from pipeline_state.recording import RunRecorder, file_count, fixity_result
-from pipeline_state import status as pipeline_status
-from pipeline_state.view import summarize_user_steps, format_stage_details
-from pipeline_state.resume import build_resume_plan, bag_layout
-from pipeline_state.freshness import load_reconciled_status
+from pipeline_state import RunRecorder, file_count, fixity_result
+import pipeline_state as pipeline_status
+from pipeline_state import summarize_user_steps, format_stage_details
+from pipeline_state import build_resume_plan, bag_layout
+from pipeline_state import load_reconciled_status
 
 from pipeline import (
     ingest_accession,

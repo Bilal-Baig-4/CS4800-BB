@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pipeline
-from pipeline_state import status as ps
+import pipeline_state as ps
 import test_gui_selective as selective_fixture
 
 

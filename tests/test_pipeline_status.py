@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pipeline_state import status as ps
+import pipeline_state as ps
 
 
 class StatusTests(unittest.TestCase):

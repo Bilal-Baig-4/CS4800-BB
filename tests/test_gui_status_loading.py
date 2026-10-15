@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import patch
 
-from pipeline_state import status as ps
+import pipeline_state as ps
 import test_gui_selective as fixture
 
 
