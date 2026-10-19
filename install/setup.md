@@ -2,14 +2,6 @@
 
 Use Python 3.10 or later with Tkinter available. Official Python installers for Windows include Tkinter; on Linux, install your distribution's Tkinter package if needed (for example, `python3-tk`).
 
-Optionally create a virtual environment in the repository root:
-
-```sh
-python -m venv .venv
-```
-
-Activate it with `.venv\Scripts\Activate.ps1` in Windows PowerShell or `source .venv/bin/activate` on macOS/Linux, then follow [Installation](INSTALLATION.md).
-
 ## Python dependencies
 
 `requirements.txt` installs `lxml` for XML/XSLT processing and `bagit` for optional BagIt construction and validation. Other application imports are part of Python's standard library; do not install them with pip.
