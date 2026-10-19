@@ -368,21 +368,38 @@ def format_stage_details(status):
 # Change-detection evidence and reconciliation
 # ============================================================================
 
-METHOD = "fingerprint-v1"
+METHOD = "fingerprint-sha256-v1"
+CHECKSUM_WORKFLOW = "sha256-v1"
+CHECKSUM_STAGES = {"ingest", "reports", "summary", "fixity", "bag_construct", "bag_validate", "tar_serialize"}
 DA = "http://dataaccessioner.org/schema/dda-1-1"
 PREMIS = "info:lc/xmlns/premis-v2"
 FITS = "http://hul.harvard.edu/ois/xml/ns/fits/fits_output"
 
 
-def _digest(value):
-    return hashlib.md5(json.dumps(value, sort_keys=True, separators=(",", ":"),
+# MD5 is used only to validate old evidence before upgrading it. New captures
+# always use SHA-256. Keep the original canonical structures for compatibility.
+LEGACY_METHODS = {name.replace("sha256", "md5"): name for name in (
+    "file-sha256-v1", "inventory-sha256-v1", "payload-stat-sha256-v1",
+    "bag-stat-sha256-v1", "fits-sha256-v1")}
+
+
+def _fingerprint_hasher(algorithm, data=b""):
+    if algorithm == "sha256":
+        return hashlib.sha256(data)
+    if algorithm == "md5":
+        return hashlib.md5(data, usedforsecurity=False)  # Historical evidence only.
+    raise ValueError("unsupported_fingerprint_algorithm")
+
+
+def _digest(value, algorithm="sha256"):
+    return _fingerprint_hasher(algorithm, json.dumps(value, sort_keys=True, separators=(",", ":"),
                                   ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
-def file_md5(path):
+def file_fingerprint(path, algorithm="sha256"):
     path = Path(path)
     before = path.stat()
-    digest = hashlib.md5()
+    digest = _fingerprint_hasher(algorithm)
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
@@ -408,7 +425,7 @@ def _xml(path):
     return tree, sorted(files, key=lambda element: element.get("name"))
 
 
-def inventory_md5(path):
+def inventory_fingerprint(path, algorithm="sha256"):
     tree, files = _xml(path)
     records = []
     for file in files:
@@ -416,10 +433,12 @@ def inventory_md5(path):
                             identifiers=[_node(n) for n in file.findall(f".//{{{PREMIS}}}objectIdentifier")],
                             fixity=[_node(n) for n in file.findall(f".//{{{PREMIS}}}fixity")],
                             premis_size=[n.text for n in file.findall(f".//{{{PREMIS}}}objectCharacteristics/{{{PREMIS}}}size")]))
-    return _digest(dict(accessions=[n.get("number") for n in tree.findall(f"{{{DA}}}accession")], files=records))
+        if "SHA256" in file.attrib:
+            records[-1]["sha256"] = file.get("SHA256")
+    return _digest(dict(accessions=[n.get("number") for n in tree.findall(f"{{{DA}}}accession")], files=records), algorithm)
 
 
-def fits_md5(path):
+def fits_fingerprint(path, algorithm="sha256"):
     _, files = _xml(path)
     records = []
     for file in files:
@@ -433,7 +452,7 @@ def fits_md5(path):
             if "fits" in notes or "droid" in notes or matching:
                 formats.append(_node(format))
         records.append(dict(path=file.get("name"), formats=formats, embedded=[_node(n) for n in embedded]))
-    return _digest(records)
+    return _digest(records, algorithm)
 
 
 def _no_link(path):
@@ -481,11 +500,11 @@ def _membership(root, include_dirs=False):
     return sorted(result)
 
 
-def payload_stat_md5(payload, layout):
-    return _digest(_membership(resolve_payload_root(payload, layout)))
+def payload_stat_fingerprint(payload, layout, algorithm="sha256"):
+    return _digest(_membership(resolve_payload_root(payload, layout)), algorithm)
 
 
-def bag_stat_md5(bag):
+def bag_stat_fingerprint(bag, algorithm="sha256"):
     bag = Path(bag)
     if resolve_payload_root(bag, "bagged") != bag / "data":
         raise ValueError("ambiguous_payload_layout")
@@ -493,8 +512,8 @@ def bag_stat_md5(bag):
     for path in sorted(bag.iterdir()):
         if path.name.casefold() in {"bagit.txt", "bag-info.txt", "aptrust-info.txt", "fetch.txt"} or re.fullmatch(r"(?:tag)?manifest-.*\.txt", path.name.casefold()):
             _no_link(path)
-            critical[path.name] = file_md5(path)
-    return _digest(dict(membership=_membership(bag, include_dirs=True), metadata=critical))
+            critical[path.name] = file_fingerprint(path, algorithm)
+    return _digest(dict(membership=_membership(bag, include_dirs=True), metadata=critical), algorithm)
 
 
 def file_stat(path):
@@ -507,17 +526,18 @@ def _specs(stage, status, accession, input_side, recording=False):
     xml, payload = f"{accession}.xml", accession
     def descriptor(method, path, reason, scope="output"):
         return dict(method=method, path=path, scope=scope, reason=reason)
-    inventory = descriptor("inventory-md5-v1", xml, "baseline_inventory_changed")
-    logical = descriptor("payload-stat-md5-v1", payload, "payload_changed")
-    exact_xml = descriptor("file-md5-v1", xml, "xml_changed")
-    bag = descriptor("bag-stat-md5-v1", accession, "bag_changed")
+    inventory = descriptor("inventory-sha256-v1", xml, "baseline_inventory_changed")
+    logical = descriptor("payload-stat-sha256-v1", payload, "payload_changed")
+    exact_xml = descriptor("file-sha256-v1", xml, "xml_changed")
+    bag = descriptor("bag-stat-sha256-v1", accession, "bag_changed")
     inputs = {
-        "antivirus": {}, "ingest": {}, "fits": dict(inventory=inventory, payload=logical),
-        "reports": dict(xml=exact_xml, csv_stylesheet=descriptor("file-md5-v1", "files.csv.xslt", "csv_stylesheet_changed", "stylesheets"),
-                        html_stylesheet=descriptor("file-md5-v1", "files.html.xslt", "html_stylesheet_changed", "stylesheets"),
+        "antivirus": {}, "ingest": {}, "fits": dict(inventory=inventory, payload=logical,
+            profile=descriptor("file-sha256-v1", "fits/config/fits-droid.xml", "fits_profile_changed", "processing")),
+        "reports": dict(xml=exact_xml, csv_stylesheet=descriptor("file-sha256-v1", "files.csv.xslt", "csv_stylesheet_changed", "stylesheets"),
+                        html_stylesheet=descriptor("file-sha256-v1", "files.html.xslt", "html_stylesheet_changed", "stylesheets"),
                         payload=logical),
-        "summary": dict(csv=descriptor("file-md5-v1", f"{accession}_files.csv", "csv_changed"),
-                        xml=exact_xml, csv_stylesheet=descriptor("file-md5-v1", "files.csv.xslt", "csv_stylesheet_changed", "stylesheets"), payload=logical),
+        "summary": dict(csv=descriptor("file-sha256-v1", f"{accession}_files.csv", "csv_changed"),
+                        xml=exact_xml, csv_stylesheet=descriptor("file-sha256-v1", "files.csv.xslt", "csv_stylesheet_changed", "stylesheets"), payload=logical),
         "fixity": dict(inventory=inventory, payload=logical),
         "bag_construct": dict(inventory=inventory, payload=logical),
         "bag_validate": dict(bag=bag), "tar_serialize": dict(bag=bag),
@@ -530,12 +550,12 @@ def _specs(stage, status, accession, input_side, recording=False):
         return inputs[stage]
     outputs = record["outputs"]
     evidence = {
-        "antivirus": {name: descriptor("file-md5-v1", path, f"{name}_output_changed") for name, path in outputs.items()},
+        "antivirus": {name: descriptor("file-sha256-v1", path, f"{name}_output_changed") for name, path in outputs.items()},
         "ingest": dict(inventory=inventory, payload=logical),
-        "fits": dict(fits=descriptor("fits-md5-v1", xml, "fits_enrichment_changed")),
-        "reports": {name: descriptor("file-md5-v1", outputs.get(name), f"{name}_output_changed") for name in ("csv", "html")},
-        "summary": dict(text=descriptor("file-md5-v1", outputs.get("text"), "summary_output_changed")),
-        "fixity": {name: descriptor("file-md5-v1", outputs.get(name), f"fixity_{name}_changed") for name in ("csv", "log")},
+        "fits": dict(fits=descriptor("fits-sha256-v1", xml, "fits_enrichment_changed")),
+        "reports": {name: descriptor("file-sha256-v1", outputs.get(name), f"{name}_output_changed") for name in ("csv", "html")},
+        "summary": dict(text=descriptor("file-sha256-v1", outputs.get("text"), "summary_output_changed")),
+        "fixity": {name: descriptor("file-sha256-v1", outputs.get(name), f"fixity_{name}_changed") for name in ("csv", "log")},
         "bag_construct": dict(bag=bag), "bag_validate": {},
         "tar_serialize": dict(tar=descriptor("file-stat-v1", outputs.get("tar"), "tar_changed")),
     }
@@ -546,16 +566,24 @@ def _snapshot(descriptor, output, layout, stylesheets):
     value = descriptor["path"]
     if not isinstance(value, str) or not value or Path(value).is_absolute() or "\\" in value or ":" in value:
         raise ValueError("invalid_evidence_path")
-    root = stylesheets if descriptor["scope"] == "stylesheets" else output
+    root = (stylesheets if descriptor["scope"] == "stylesheets" else
+            Path(__file__).resolve().parent if descriptor["scope"] == "processing" else output)
     path = root / value
     if not path.resolve().is_relative_to(root.resolve()):
         raise ValueError("invalid_evidence_path")
     _no_link(path)
-    method = descriptor["method"]
-    functions = {"file-md5-v1": file_md5, "inventory-md5-v1": inventory_md5, "fits-md5-v1": fits_md5,
-                 "bag-stat-md5-v1": bag_stat_md5, "file-stat-v1": file_stat}
-    digest = payload_stat_md5(path, layout) if method == "payload-stat-md5-v1" else functions[method](path)
-    return dict(method=method, value=digest, path=value, scope=descriptor["scope"])
+    recorded_method = descriptor["method"]
+    method = LEGACY_METHODS.get(recorded_method, recorded_method)
+    algorithm = "md5" if recorded_method in LEGACY_METHODS else "sha256"
+    functions = {"file-sha256-v1": file_fingerprint, "inventory-sha256-v1": inventory_fingerprint, "fits-sha256-v1": fits_fingerprint,
+                 "bag-stat-sha256-v1": bag_stat_fingerprint, "file-stat-v1": file_stat}
+    if method == "file-stat-v1":
+        digest = file_stat(path)
+    elif method == "payload-stat-sha256-v1":
+        digest = payload_stat_fingerprint(path, layout, algorithm)
+    else:
+        digest = functions[method](path, algorithm) if algorithm == "md5" else functions[method](path)
+    return dict(method=recorded_method, value=digest, path=value, scope=descriptor["scope"])
 
 
 def capture_stage(stage, status, output, accession, input_side, stylesheets=None):
@@ -571,7 +599,7 @@ def capture_stage(stage, status, output, accession, input_side, stylesheets=None
             captured[name] = _snapshot(descriptor, output, status["layout"], stylesheets)
         except Exception:
             errors.append(f"evidence_capture_unavailable_{name}")
-    if stage == "bag_construct" and input_side:
+    if input_side:
         captured["settings"] = deepcopy(status["steps"][stage]["settings"])
     return captured, errors
 
@@ -599,6 +627,10 @@ def reconcile_status(status, output, accession, stylesheets=None):
         if stage not in STAGE_IDS or record["state"] != "completed":
             continue
         stale, unknown = [], []
+        if stage in CHECKSUM_STAGES and record["settings"].get("checksum_workflow") != CHECKSUM_WORKFLOW:
+            record["freshness"].update(state="stale", checked_at=now(), method=METHOD,
+                                       reasons=["checksum_workflow_changed"])
+            continue
         has_evidence = bool(record["inputs"] or record["evidence"])
         if not has_evidence:
             if record["freshness"]["state"] == "current":
@@ -613,15 +645,29 @@ def reconcile_status(status, output, accession, stylesheets=None):
                 if not isinstance(previous, dict) or not {"method", "value", "path", "scope"} <= previous.keys():
                     unknown.append("missing_evidence")
                     continue
-                if previous.get("method") != descriptor["method"]:
+                legacy = LEGACY_METHODS.get(previous.get("method")) == descriptor["method"]
+                if previous.get("method") != descriptor["method"] and not legacy:
                     unknown.append("unsupported_evidence_method")
                     continue
                 try:
+                    if legacy:
+                        # Verify the old baseline first. Never rebase changed evidence.
+                        old = _snapshot(dict(descriptor, method=previous["method"]),
+                                        output, candidate["layout"], stylesheets)
+                        if previous != old:
+                            stale.append(descriptor["reason"])
+                            continue
                     key = (descriptor["method"], descriptor["scope"], descriptor["path"])
                     if key not in cache:
                         cache[key] = _snapshot(descriptor, output, candidate["layout"], stylesheets)
                     current = cache[key]
-                    if previous != current:
+                    if legacy:
+                        if _snapshot(dict(descriptor, method=previous["method"]),
+                                     output, candidate["layout"], stylesheets) != previous:
+                            stale.append(descriptor["reason"])
+                            continue
+                        record[side][name] = current
+                    elif previous != current:
                         stale.append(descriptor["reason"])
                 except FileNotFoundError:
                     stale.append("missing_output" if side == "evidence" else "missing_input")
@@ -631,7 +677,7 @@ def reconcile_status(status, output, accession, stylesheets=None):
                         stale.append(str(exc))
                     else:
                         unknown.append("fingerprint_unavailable")
-        if stage == "bag_construct" and record["inputs"].get("settings") != record["settings"]:
+        if "settings" in record["inputs"] and record["inputs"]["settings"] != record["settings"]:
             stale.append("settings_changed")
         if stage == "antivirus":
             unknown.append("time_sensitive_scan")
@@ -723,6 +769,9 @@ class RunRecorder:
 
     def run(self, stage, operation, normalize, *, settings=None, failure_outcome="error",
             progress=None, layout=None):
+        settings = dict(settings or {})
+        if stage in CHECKSUM_STAGES:
+            settings["checksum_workflow"] = CHECKSUM_WORKFLOW
         candidate = deepcopy(self.status)
         step = candidate["steps"][stage]
         step.update(state="running", outcome=None, attempt=step["attempt"] + 1,

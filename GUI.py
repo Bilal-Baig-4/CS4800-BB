@@ -18,6 +18,7 @@ from pipeline_state import load_reconciled_status
 
 from pipeline import (
     ingest_accession,
+    stored_checksum,
     enrich_accession_with_fits,
     run_xslt_processor,
     XSLT_DIR,
@@ -178,8 +179,8 @@ def require_accession_xml(xml, accession, payload=None, operation="Reports"):
                 if record.find("{info:lc/xmlns/premis-v2}object/"
                                "{info:lc/xmlns/premis-v2}objectCharacteristics") is None:
                     raise ValueError(f"Format Identification requires baseline PREMIS metadata: {name}")
-            if operation == "Fixity" and not re.fullmatch(r"[0-9a-fA-F]{32}", record.get("MD5", "")):
-                raise ValueError(f"Fixity requires an MD5 baseline for: {name}")
+            if operation == "Fixity":
+                stored_checksum(record)
 
 
 def validate_selected_run(options, allow_no_steps=False):
@@ -675,11 +676,13 @@ def run_pipeline(options=None, plan=None):
             require_unbagged(payload, "Format Identification")
             require_accession_xml(xml, accession, payload, "Format Identification")
             status_var.set("Running Format Identification...")
+            fits_observation = {}
             recorder.run("fits", lambda: enrich_accession_with_fits(payload, xml,
                 progress_callback=lambda current, total, name: root.after(
-                    0, status_var.set, f"Format Identification: {current}/{total}: {name}")),
-                lambda _: dict(outcome="processed", outputs=recorder.paths(xml=xml),
-                               result={"message": "API returned normally; per-attempt FITS findings are not exposed."}))
+                    0, status_var.set, f"Format Identification: {current}/{total}: {name}"),
+                result_callback=fits_observation.update),
+                lambda _: dict(outcome=fits_observation.get("outcome", "processed"),
+                               outputs=recorder.paths(xml=xml), result=fits_observation))
         if should_run("reports") or should_run("summary"):
             if should_run("reports"):
                 require_accession_xml(xml, accession)
@@ -725,7 +728,7 @@ def run_pipeline(options=None, plan=None):
                                              xml_manifest=xml if xml.exists() else None,
                                              **options["metadata"]),
                         lambda path: dict(outcome="constructed", outputs=recorder.paths(
-                            bag=path, declaration=Path(path) / "bagit.txt", manifest=Path(path) / "manifest-md5.txt")),
+                            bag=path, declaration=Path(path) / "bagit.txt", manifest=Path(path) / "manifest-sha256.txt")),
                         settings=dict(profile=options["profile"], **{key: options["metadata"][key] for key in
                                       ("source_organization", "access", "storage_option")}),
                         failure_outcome=lambda exc: "rejected" if isinstance(exc, ValueError) else "error", layout="bagged")

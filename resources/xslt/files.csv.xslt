@@ -5,7 +5,7 @@
   <xsl:strip-space elements="*"/>
   <xsl:variable name="eol" select="'&#10;'"/>
   <xsl:template match="/">
-    <xsl:text>"directory path","file name","file extension","last modified","size (bytes)","md5","file format","format version","format registry key/PUID","Identified By","MIME Type","ID Warning"</xsl:text>
+    <xsl:text>"directory path","file name","file extension","last modified","size (bytes)","sha256","md5","file format","format version","format registry key/PUID","Identified By","MIME Type","ID Warning"</xsl:text>
     <xsl:value-of select="$eol"/>
     <xsl:for-each select="//da:file">
       <!-- directory path -->
@@ -41,7 +41,10 @@
       <xsl:value-of select="@size"/>
       <xsl:text>",</xsl:text>
 
-      <!-- md5 -->
+      <!-- SHA-256 and explicitly labelled historical MD5 -->
+      <xsl:text>"</xsl:text>
+      <xsl:value-of select="@SHA256"/>
+      <xsl:text>",</xsl:text>
       <xsl:text>"</xsl:text>
       <xsl:value-of select="@MD5"/>
       <xsl:text>",</xsl:text>

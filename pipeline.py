@@ -126,6 +126,46 @@ def compute_md5(file_path, chunk_size=1024 * 1024):
     return md5.hexdigest()
 
 
+def compute_sha256(file_path, chunk_size=1024 * 1024):
+    """Compute a preservation digest with bounded memory."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stored_checksum(record):
+    """Read an explicitly identified baseline; never reinterpret legacy MD5."""
+    values = {}
+    for attribute, algorithm, length in (("SHA256", "SHA-256", 64), ("MD5", "MD5", 32)):
+        if attribute in record.attrib:
+            value = record.get(attribute, "")
+            if not re.fullmatch(rf"[0-9a-fA-F]{{{length}}}", value):
+                raise ValueError(f"Invalid {algorithm} baseline for {record.get('name')}")
+            values[algorithm] = value.lower()
+    for fixity in record.findall(f"{{{PREMIS_NS}}}object/{{{PREMIS_NS}}}objectCharacteristics/{{{PREMIS_NS}}}fixity"):
+        algorithm = fixity.findtext(f"{{{PREMIS_NS}}}messageDigestAlgorithm", "")
+        algorithm = {"SHA256": "SHA-256", "SHA-256": "SHA-256", "MD5": "MD5"}.get(algorithm.upper())
+        if algorithm is None:
+            raise ValueError("Unsupported PREMIS checksum algorithm")
+        value = fixity.findtext(f"{{{PREMIS_NS}}}messageDigest", "").lower()
+        length = 64 if algorithm == "SHA-256" else 32
+        if not re.fullmatch(rf"[0-9a-f]{{{length}}}", value) or (algorithm in values and values[algorithm] != value):
+            raise ValueError("Invalid or conflicting PREMIS checksum")
+        values[algorithm] = value
+    for algorithm in ("SHA-256", "MD5"):
+        if algorithm in values:
+            return algorithm, values[algorithm]
+    raise ValueError("Missing supported checksum baseline")
+
+
+def compute_checksum(path, algorithm):
+    return compute_sha256(path) if algorithm == "SHA-256" else compute_md5(path)
+
+
 # ==========================
 # ANTIVIRUS SCANNER
 # ==========================
@@ -285,7 +325,7 @@ def configure_fits(fits_home=None):
     """Validate once per accession. Return (home, java), or None to skip FITS."""
     def unavailable(code, detail):
         logging.warning("[FITS:%s] %s Format identification skipped for this accession; "
-                        "transfer, UUID, MD5 and size continue. See install/setup.md for setup.", code, detail)
+                        "transfer, UUID, SHA-256 and size continue. See install/setup.md for setup.", code, detail)
 
     launcher_name = "fits.bat" if os.name == "nt" else "fits.sh"
     configured = fits_home or os.environ.get("FITS_HOME", "").strip()
@@ -376,7 +416,7 @@ def add_object_characteristics(premis_obj, checksum, size, fits_result=None):
     characteristics = element(premis_obj, "objectCharacteristics")
     element(characteristics, "compositionLevel", "0")
     fixity = element(characteristics, "fixity")
-    element(fixity, "messageDigestAlgorithm", "MD5")
+    element(fixity, "messageDigestAlgorithm", "SHA-256")
     element(fixity, "messageDigest", checksum)
     element(fixity, "messageDigestOriginator", "Pipeline (Python hashlib)")
     element(characteristics, "size", str(size))
@@ -438,7 +478,7 @@ def ingest_accession(data_directory, output_folder, accession_number,
                      move_files=False, clean_files_only=None, progress_callback=None):
     """Transfer files and write the baseline inventory without configuring FITS.
 
-    Returns <output_folder>/<accession_number>.xml. UUIDs, sizes and MD5s are
+    Returns <output_folder>/<accession_number>.xml. UUIDs, sizes and SHA-256 digests are
     created here; enrich_accession_with_fits preserves them. This is a fresh
     ingest operation, not a resume/merge operation for an existing inventory.
     """
@@ -477,7 +517,7 @@ def ingest_accession(data_directory, output_folder, accession_number,
             accession_el, "file",
             name=str(rel_path.as_posix()),
             size=str(dest_path.stat().st_size),
-            MD5=checksum,
+            SHA256=checksum,
         )
 
         premis_obj = LET.SubElement(
@@ -524,10 +564,10 @@ def ingest_accession(data_directory, output_folder, accession_number,
             shutil.copy2(str(file_path), str(dest_path))
 
         # Restore original timestamps explicitly after copy
-        os.utime(dest_path, (atime, mtime))
+        os.utime(dest_path, ns=(stat_src.st_atime_ns, stat_src.st_mtime_ns))
 
-        checksum = compute_md5(dest_path)
-        os.utime(dest_path, (atime, mtime))
+        checksum = compute_sha256(dest_path)
+        os.utime(dest_path, ns=(stat_src.st_atime_ns, stat_src.st_mtime_ns))
         report_progress(rel_path)
         finish_file(dest_path, rel_path, checksum)
         completed += 1
@@ -554,14 +594,16 @@ def ingest_accession(data_directory, output_folder, accession_number,
 
 
 def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
-                               fits_workers=2, progress_callback=None):
+                               fits_workers=2, progress_callback=None, result_callback=None):
     """Enrich an existing inventory in place without transferring or hashing.
 
     accession_folder is the unbagged payload root. Only files listed in XML
     are identified. Successful results replace prior FITS-derived formats and
     FITS extension trees; failed files retain all existing metadata. Baseline
     attributes, UUIDs, fixity, size and unrelated metadata are left untouched.
-    Returns xml_input. No status tracking or post-bag path discovery is done.
+    Returns xml_input. Optional result_callback receives per-attempt counts and
+    outcome; historical XML is never used to infer this attempt's success.
+    No status tracking or post-bag path discovery is done.
     """
     if fits_workers not in (1, 2):
         raise ValueError("fits_workers must be 1 or 2")
@@ -571,6 +613,8 @@ def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
     files = tree.findall(".//{http://dataaccessioner.org/schema/dda-1-1}file")
     fits_config = configure_fits(fits_home)
     completed = 0
+    counts = dict(file_count=len(files), identified_count=0, unidentified_count=0,
+                  error_count=0, unavailable_count=0)
 
     def finish_file(file_el, dest_path, times, future):
         nonlocal completed
@@ -581,25 +625,30 @@ def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
             except Exception:
                 logging.warning("Could not update accession progress.", exc_info=True)
         if future is None:
+            counts["unavailable_count" if fits_config is None else "error_count"] += 1
             return
         try:
             fits_result = future.result()
         except subprocess.TimeoutExpired:
+            counts["error_count"] += 1
             logging.warning("[FITS:TIMEOUT] %s exceeded 300 seconds; existing metadata retained.", dest_path)
             return
         except subprocess.CalledProcessError as exc:
+            counts["error_count"] += 1
             logging.warning("[FITS:EXIT_ERROR] %s; exit code %s; %s", dest_path, exc.returncode,
                             (exc.stderr or exc.stdout or "No diagnostic output")[-2000:])
             return
         except (LET.XMLSyntaxError, ValueError) as exc:
+            counts["error_count"] += 1
             logging.warning("[FITS:INVALID_XML] %s: %s", dest_path, exc)
             return
         except (OSError, subprocess.SubprocessError) as exc:
+            counts["error_count"] += 1
             logging.warning("[FITS:EXECUTION_ERROR] %s: %s", dest_path, exc)
             return
         finally:
             try:
-                os.utime(dest_path, times)
+                os.utime(dest_path, ns=times)
             except OSError as exc:
                 logging.warning("Could not restore timestamps after FITS for %s: %s", dest_path, exc)
 
@@ -607,6 +656,7 @@ def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
         _replace_fits_metadata(characteristics, fits_result)
         formats = characteristics.findall(f"{{{PREMIS_NS}}}format")
         puids = characteristics.findall(f".//{{{PREMIS_NS}}}formatRegistryKey")
+        counts["identified_count" if formats else "unidentified_count"] += 1
         if formats:
             logging.info("[FITS:IDENTIFIED] %s; %d format(s); PUIDs: %s", dest_path,
                          len(formats), ", ".join(p.text for p in puids) or "none reported")
@@ -629,7 +679,7 @@ def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
                     if file_el.find(f"{{{PREMIS_NS}}}object/{{{PREMIS_NS}}}objectCharacteristics") is None:
                         raise ValueError("File record has no baseline PREMIS characteristics")
                     stat = dest_path.stat()
-                    times = (stat.st_atime, stat.st_mtime)
+                    times = (stat.st_atime_ns, stat.st_mtime_ns)
                     future = executor.submit(identify_with_fits, dest_path, *fits_config)
                 except (OSError, ValueError) as exc:
                     logging.warning("[FITS:EXECUTION_ERROR] %s: %s", dest_path, exc)
@@ -652,6 +702,11 @@ def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
         finally:
             if temporary is not None and temporary.exists():
                 temporary.unlink()
+    if result_callback is not None:
+        outcome = ("empty" if not files else "unavailable" if counts["unavailable_count"] else
+                   "partial" if counts["error_count"] else
+                   "identified" if counts["identified_count"] else "unidentified")
+        result_callback(dict(outcome=outcome, **counts))
     return xml_input
 
 
@@ -717,7 +772,7 @@ def run_xslt_processor(xml_input, xslt_file, output_file):
 
 def _write_aptrust_info(bag_dir, title, access, storage_option, description=""):
     """
-    Write aptrust-info.txt into the bag root and regenerate tagmanifest-md5.txt
+    Write aptrust-info.txt into the bag root and regenerate tagmanifest-sha256.txt
     so the new file is properly checksummed.
 
     APTrust requires this custom tag file in addition to the standard bag-info.txt.
@@ -745,13 +800,13 @@ def _write_aptrust_info(bag_dir, title, access, storage_option, description=""):
         f.write("\n".join(lines) + "\n")
 
     # Regenerate tag manifest to include aptrust-info.txt
-    tag_manifest_path = Path(bag_dir) / "tagmanifest-md5.txt"
-    tag_files = ["bagit.txt", "bag-info.txt", "aptrust-info.txt", "manifest-md5.txt"]
+    tag_manifest_path = Path(bag_dir) / "tagmanifest-sha256.txt"
+    tag_files = ["bagit.txt", "bag-info.txt", "aptrust-info.txt", "manifest-sha256.txt"]
     tag_manifest_lines = []
     for tag_file in tag_files:
         tf_path = Path(bag_dir) / tag_file
         if tf_path.exists():
-            tag_manifest_lines.append(f"{compute_md5(tf_path)}  {tag_file}")
+            tag_manifest_lines.append(f"{compute_sha256(tf_path)}  {tag_file}")
 
     with open(tag_manifest_path, "w", encoding="utf-8") as f:
         f.write("\n".join(tag_manifest_lines) + "\n")
@@ -762,7 +817,7 @@ def _write_aptrust_info(bag_dir, title, access, storage_option, description=""):
 def _bag_preflight(accession_folder, accession_number, contact_name, contact_email,
                    source_organization, profile, title, access, storage_option,
                    description, xml_manifest):
-    """Return the payload root, entries and verified MD5s without writing files."""
+    """Return the payload root, entries and verified SHA-256 digests without writing files."""
     if not BAGIT_AVAILABLE:
         raise RuntimeError("bagit-python is not installed.")
     root = Path(accession_folder)
@@ -837,15 +892,14 @@ def _bag_preflight(accession_folder, accession_number, contact_name, contact_ema
                 raise ValueError("Expected a Data Accessioner collection XML baseline")
             baseline = {}
             for record in tree.xpath("//d:file", namespaces=ns):
-                name, digest = record.get("name", ""), record.get("MD5", "")
+                name = record.get("name", "")
+                algorithm, digest = stored_checksum(record)
                 if (not name or "\\" in name or ":" in name
                         or any(part in ("", ".", "..") for part in name.split("/"))):
                     raise ValueError(f"Invalid baseline relative path: {name!r}")
                 if name in baseline:
                     raise ValueError(f"Duplicate baseline file record: {name}")
-                if not re.fullmatch(r"[0-9a-fA-F]{32}", digest):
-                    raise ValueError(f"Invalid baseline MD5 for {name}")
-                baseline[name] = digest.lower()
+                baseline[name] = (algorithm, digest)
         except (OSError, LET.XMLSyntaxError, ValueError) as exc:
             raise ValueError(f"Cannot verify supplied XML baseline: {exc}") from exc
         missing = sorted(set(baseline) - set(payload))
@@ -855,12 +909,12 @@ def _bag_preflight(accession_folder, accession_number, contact_name, contact_ema
 
     checksums = {}
     for rel, path in sorted(payload.items()):
-        digest = compute_md5(path)
-        if baseline is not None and digest != baseline[rel]:
-            raise ValueError(f"Baseline MD5 mismatch: {rel}. Construction refused before payload movement.")
-        checksums[rel] = baseline[rel] if baseline is not None else digest
+        digest = compute_sha256(path)
+        if baseline is not None and compute_checksum(path, baseline[rel][0]) != baseline[rel][1]:
+            raise ValueError(f"Baseline checksum mismatch: {rel}. Construction refused before payload movement.")
+        checksums[rel] = digest
     logging.info("BagIt preflight passed: %d payload files; %s.", len(checksums),
-                 "XML baseline verified" if baseline is not None else "fresh MD5s (no XML baseline supplied)")
+                 "XML baseline verified" if baseline is not None else "fresh SHA-256 digests (no XML baseline supplied)")
     return root, entries, checksums
 
 
@@ -904,11 +958,11 @@ def construct_bag(accession_folder, accession_number, contact_name="", contact_e
             "BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n", encoding="utf-8")
         (root / "bag-info.txt").write_text(
             "".join(f"{key}: {value}\n" for key, value in metadata.items()), encoding="utf-8")
-        (root / "manifest-md5.txt").write_text(
+        (root / "manifest-sha256.txt").write_text(
             "".join(f"{digest}  data/{rel}\n" for rel, digest in checksums.items()), encoding="utf-8")
-        tags = ("bagit.txt", "bag-info.txt", "manifest-md5.txt")
-        (root / "tagmanifest-md5.txt").write_text(
-            "".join(f"{compute_md5(root / name)}  {name}\n" for name in tags), encoding="utf-8")
+        tags = ("bagit.txt", "bag-info.txt", "manifest-sha256.txt")
+        (root / "tagmanifest-sha256.txt").write_text(
+            "".join(f"{compute_sha256(root / name)}  {name}\n" for name in tags), encoding="utf-8")
         if profile == "aptrust":
             _write_aptrust_info(root, title, access, storage_option, description)
     except Exception:
@@ -1020,7 +1074,7 @@ def validate_bag(bag_path, result_callback=None):
 
 def run_fixity(xml_input, output_folder, accession_number):
     """
-    Verify MD5 checksums recorded in the XML manifest against files on disk.
+    Verify algorithm-identified checksums recorded in the XML manifest against files on disk.
     Always runs before BagIt packaging, so files are always directly inside
     the accession folder (never in a data/ subdirectory at this point).
     Writes a CSV report and log file to output_folder.
@@ -1050,19 +1104,22 @@ def run_fixity(xml_input, output_folder, accession_number):
     ):
         rel        = Path(file_el.get("name"))
         file_path  = accession_folder / rel
-        md5_stored = file_el.get("MD5")
+        algorithm, stored_digest = "", ""
 
         status       = "OK"
-        computed_md5 = ""
+        computed_digest = ""
         error        = ""
 
         try:
+            algorithm, stored_digest = stored_checksum(file_el)
+            if not file_path.resolve().is_relative_to(accession_folder.resolve()):
+                raise ValueError("Baseline path escapes accession")
             if not file_path.exists():
                 status = "MISSING"
                 error  = "File not found"
             else:
-                computed_md5 = compute_md5(file_path)
-                if computed_md5 != md5_stored:
+                computed_digest = compute_checksum(file_path, algorithm)
+                if computed_digest != stored_digest:
                     status = "MISMATCH"
         except Exception as exc:
             status = "ERROR"
@@ -1070,8 +1127,9 @@ def run_fixity(xml_input, output_folder, accession_number):
 
         results.append({
             "file_path":    str(file_path),
-            "stored_md5":   md5_stored or "",
-            "computed_md5": computed_md5 or "",
+            "algorithm": algorithm,
+            "stored_checksum":   stored_digest or "",
+            "computed_checksum": computed_digest or "",
             "status":       status,
             "error":        error,
         })
@@ -1079,20 +1137,13 @@ def run_fixity(xml_input, output_folder, accession_number):
 
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["file_path", "stored_md5", "computed_md5", "status", "error"]
+            f, fieldnames=["file_path", "algorithm", "stored_checksum", "computed_checksum", "status", "error"]
         )
         writer.writeheader()
         writer.writerows(results)
 
     fh.close()
     fixity_log.removeHandler(fh)
-
-    with open(csv_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["file_path", "stored_md5", "computed_md5", "status", "error"]
-        )
-        writer.writeheader()
-        writer.writerows(results)
 
     return csv_file, log_file
 
