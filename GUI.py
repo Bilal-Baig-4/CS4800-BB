@@ -20,6 +20,7 @@ from pipeline import (
     ingest_accession,
     enrich_accession_with_fits,
     run_xslt_processor,
+    XSLT_DIR,
     run_fixity,
     generate_summary_report,
     run_antivirus_scan,
@@ -219,7 +220,7 @@ def validate_selected_run(options, allow_no_steps=False):
             require_accession_xml(xml, accession, payload if key != "reports" else None, label)
     if steps["reports"]:
         for stylesheet in ("files.csv.xslt", "files.html.xslt"):
-            if not (Path(__file__).parent / stylesheet).is_file():
+            if not (XSLT_DIR / stylesheet).is_file():
                 raise ValueError(f"Reports requires stylesheet: {stylesheet}")
     if steps["bagging"]:
         if not BAGIT_AVAILABLE:
@@ -688,9 +689,9 @@ def run_pipeline(options=None, plan=None):
             report_progress = dict(csv_generated=False, html_generated=False)
 
             def generate_reports():
-                run_xslt_processor(xml, Path(__file__).parent / "files.csv.xslt", csv)
+                run_xslt_processor(xml, XSLT_DIR / "files.csv.xslt", csv)
                 report_progress["csv_generated"] = True
-                run_xslt_processor(xml, Path(__file__).parent / "files.html.xslt", html)
+                run_xslt_processor(xml, XSLT_DIR / "files.html.xslt", html)
                 report_progress["html_generated"] = True
 
             if should_run("reports"):

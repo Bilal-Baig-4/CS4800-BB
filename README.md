@@ -2,6 +2,10 @@
 
 Automation for Data Accessioner, FITS, XSLTProcessor, hashlib, Microsoft Defender, and DART.
 
+## Installation
+
+See [Installation](install/INSTALLATION.md) to install dependencies and run the application.
+
 ## Data Accessioner
 - Transfers files from disks onto a file server
 - Output: XML file and the full directory from the input

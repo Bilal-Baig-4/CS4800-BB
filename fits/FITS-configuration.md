@@ -19,8 +19,7 @@ Only DROID is enabled, with no extension exclusions. Python supplies checksums a
 5. Update the pipeline configuration path only if the new configuration uses a different filename or location.
 6. Test with a small sample accession.
 7. Verify the expected FITS metadata and PUID output.
-8. Run the automated test suite: `py -m unittest discover -s tests -v`.
-9. Compare processing performance if additional tools significantly increase runtime.
+8. Compare processing performance if additional tools significantly increase runtime.
 
 ## Restoring the Current Configuration
 
@@ -28,5 +27,5 @@ Restore the original DROID-focused configuration and point the pipeline back to 
 
 ## Related Notes
 
-- [Installation and diagnostics](../installation)
+- [Installation and diagnostics](../install/setup.md)
 - [Bundled vendor configuration](tools/fits-1.6.0/xml/fits.xml)

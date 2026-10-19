@@ -14,6 +14,8 @@ import re
 import tempfile
 from lxml import etree as ET
 
+XSLT_DIR = Path(__file__).resolve().parent / "resources" / "xslt"
+
 
 # ============================================================================
 # Status schema and atomic storage
@@ -559,7 +561,7 @@ def _snapshot(descriptor, output, layout, stylesheets):
 def capture_stage(stage, status, output, accession, input_side, stylesheets=None):
     """Best-effort evidence capture; errors never invalidate technical completion."""
     output = Path(output).resolve()
-    stylesheets = Path(stylesheets or Path(__file__).resolve().parent).resolve()
+    stylesheets = Path(stylesheets or XSLT_DIR).resolve()
     captured, errors = {}, []
     specs = _specs(stage, status, accession, input_side, recording=True)
     for name, descriptor in specs.items():
@@ -590,7 +592,7 @@ def reconcile_status(status, output, accession, stylesheets=None):
     _validate(status, accession)
     output = Path(output).resolve()
     _status_path(output, accession)
-    stylesheets = Path(stylesheets or Path(__file__).resolve().parent).resolve()
+    stylesheets = Path(stylesheets or XSLT_DIR).resolve()
     candidate = deepcopy(status)
     cache = {}
     for stage, record in candidate["steps"].items():

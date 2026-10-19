@@ -277,6 +277,7 @@ def run_antivirus_scan(data_directory, output_folder, accession_number, result_c
 
 PREMIS_NS = "info:lc/xmlns/premis-v2"
 FITS_NS = "http://hul.harvard.edu/ois/xml/ns/fits/fits_output"
+XSLT_DIR = Path(__file__).resolve().parent / "resources" / "xslt"
 FITS_PROFILE = Path(__file__).resolve().parent / "fits" / "config" / "fits-droid.xml"
 
 
@@ -284,7 +285,7 @@ def configure_fits(fits_home=None):
     """Validate once per accession. Return (home, java), or None to skip FITS."""
     def unavailable(code, detail):
         logging.warning("[FITS:%s] %s Format identification skipped for this accession; "
-                        "transfer, UUID, MD5 and size continue. See installation for setup.", code, detail)
+                        "transfer, UUID, MD5 and size continue. See install/setup.md for setup.", code, detail)
 
     launcher_name = "fits.bat" if os.name == "nt" else "fits.sh"
     configured = fits_home or os.environ.get("FITS_HOME", "").strip()
