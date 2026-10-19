@@ -113,7 +113,10 @@
                 <xsl:for-each select="@*">
                     <tr>
                         <th>
-                            <xsl:value-of select="name()"/>
+                            <xsl:choose>
+                                <xsl:when test="name()='SHA256'">SHA-256</xsl:when>
+                                <xsl:otherwise><xsl:value-of select="name()"/></xsl:otherwise>
+                            </xsl:choose>
                         </th>
                         <td>
                             <xsl:value-of select="."/>
@@ -150,7 +153,10 @@
                     <xsl:for-each select="premis:objectCharacteristics/premis:fixity">
                         <tr>
                             <td>
-                                <xsl:value-of select="premis:messageDigestAlgorithm"/>
+                                <xsl:choose>
+                                    <xsl:when test="premis:messageDigestAlgorithm='SHA256'">SHA-256</xsl:when>
+                                    <xsl:otherwise><xsl:value-of select="premis:messageDigestAlgorithm"/></xsl:otherwise>
+                                </xsl:choose>
                             </td>
                             <td>
                                 <xsl:value-of select="premis:messageDigest"/>

@@ -4,8 +4,14 @@
   <xsl:output method="text" encoding="UTF-8" omit-xml-declaration="yes"/>
   <xsl:strip-space elements="*"/>
   <xsl:variable name="eol" select="'&#10;'"/>
+  <!-- Include only algorithms actually recorded; keep mixed inventories labelled. -->
+  <xsl:variable name="has-sha256" select="boolean(//da:file/@SHA256 | //da:file/premis:object/premis:objectCharacteristics/premis:fixity[premis:messageDigestAlgorithm='SHA-256' or premis:messageDigestAlgorithm='SHA256']) or not(//da:file)"/>
+  <xsl:variable name="has-md5" select="boolean(//da:file/@MD5 | //da:file/premis:object/premis:objectCharacteristics/premis:fixity[premis:messageDigestAlgorithm='MD5'])"/>
   <xsl:template match="/">
-    <xsl:text>"directory path","file name","file extension","last modified","size (bytes)","sha256","md5","file format","format version","format registry key/PUID","Identified By","MIME Type","ID Warning"</xsl:text>
+    <xsl:text>"directory path","file name","file extension","last modified","size (bytes)",</xsl:text>
+    <xsl:if test="$has-sha256"><xsl:text>"SHA-256",</xsl:text></xsl:if>
+    <xsl:if test="$has-md5"><xsl:text>"MD5",</xsl:text></xsl:if>
+    <xsl:text>"file format","format version","format registry key/PUID","Identified By","MIME Type","ID Warning"</xsl:text>
     <xsl:value-of select="$eol"/>
     <xsl:for-each select="//da:file">
       <!-- directory path -->
@@ -41,13 +47,17 @@
       <xsl:value-of select="@size"/>
       <xsl:text>",</xsl:text>
 
-      <!-- SHA-256 and explicitly labelled historical MD5 -->
-      <xsl:text>"</xsl:text>
-      <xsl:value-of select="@SHA256"/>
-      <xsl:text>",</xsl:text>
-      <xsl:text>"</xsl:text>
-      <xsl:value-of select="@MD5"/>
-      <xsl:text>",</xsl:text>
+      <!-- Values remain associated with their recorded algorithm. -->
+      <xsl:if test="$has-sha256">
+        <xsl:text>"</xsl:text>
+        <xsl:value-of select="(@SHA256 | premis:object/premis:objectCharacteristics/premis:fixity[premis:messageDigestAlgorithm='SHA-256' or premis:messageDigestAlgorithm='SHA256']/premis:messageDigest)[1]"/>
+        <xsl:text>",</xsl:text>
+      </xsl:if>
+      <xsl:if test="$has-md5">
+        <xsl:text>"</xsl:text>
+        <xsl:value-of select="(@MD5 | premis:object/premis:objectCharacteristics/premis:fixity[premis:messageDigestAlgorithm='MD5']/premis:messageDigest)[1]"/>
+        <xsl:text>",</xsl:text>
+      </xsl:if>
 
       <!-- file format -->
       <xsl:text>"</xsl:text>

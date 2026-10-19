@@ -76,7 +76,7 @@ class PreservationTests(unittest.TestCase):
             p.run_xslt_processor(self.xml, p.XSLT_DIR / ('files.' + kind + '.xslt'), report)
             text = report.read_text(encoding='utf-8')
             self.assertIn(self.digest, text)
-            self.assertIn('sha256' if kind == 'csv' else 'SHA-256', text)
+            self.assertIn('SHA-256', text)
             self.assertIn('file.txt', text)
 
     def check_bag(self, profile='generic'):

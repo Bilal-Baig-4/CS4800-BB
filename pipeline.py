@@ -1133,7 +1133,8 @@ def run_fixity(xml_input, output_folder, accession_number):
             "status":       status,
             "error":        error,
         })
-        fixity_log.info(f"[{status}] {file_path}")
+        fixity_log.info("[%s] %s algorithm=%s stored=%s computed=%s error=%s",
+                        status, file_path, algorithm, stored_digest, computed_digest, error)
 
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
