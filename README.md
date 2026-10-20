@@ -33,7 +33,7 @@ See [Installation](install/INSTALLATION.md) to install dependencies and run the 
     - Includes file metadata and checksums
 - Sample output
     - CSV:
-      <img width="1772" height="324" alt="Screenshot 2025-12-08 131338" src="https://github.com/user-attachments/assets/b239666f-0293-4726-b61a-8691ff9fb6c1" />
+      <img width="1780" height="193" alt="image" src="https://github.com/user-attachments/assets/77c7f8d0-6a58-4055-b66a-3265235e2fa6" />
 
     - HTML:
       <img width="971" height="691" alt="Screenshot 2025-12-08 131635" src="https://github.com/user-attachments/assets/5a1a1d4b-b57a-470d-8ebb-58ef80b411c2" />
