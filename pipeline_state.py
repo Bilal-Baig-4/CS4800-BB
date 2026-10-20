@@ -45,7 +45,6 @@ def _now():
 def _status_path(output_folder, accession_number):
     # Apply Windows component rules even when read on another operating system.
     if (not isinstance(accession_number, str) or not accession_number
-            or ".." in accession_number
             or re.search(r'[<>:"/\\|?*\x00-\x1f\x7f]', accession_number)
             or accession_number != accession_number.strip()
             or accession_number.endswith(".")
@@ -237,7 +236,7 @@ OUTCOME_LABELS = {
     "clean": "Clean", "detections": "Detections", "partial": "Partial Results",
     "unavailable": "Unavailable", "empty": "Empty", "generated": "Generated",
     "processed": "Detailed Results Unavailable", "identified": "Identified",
-    "unidentified": "Unidentified", "passed": "Passed", "findings": "Findings",
+    "unidentified": "Unidentified", "passed": "Fixity Verified", "findings": "Fixity Issues Found",
     "constructed": "Constructed", "rejected": "Rejected", "valid": "Valid",
     "invalid": "Invalid", "indeterminate": "Indeterminate", "serialized": "Serialized",
     "error": "Error",
@@ -461,7 +460,7 @@ def _no_link(path):
 
 
 def resolve_payload_root(payload, layout):
-    """Resolve physical layout for inspection only, never post-bag execution."""
+    """Resolve logical accession files for inspection and downstream execution."""
     payload = Path(payload)
     _no_link(payload)
     if not payload.is_dir():
@@ -936,6 +935,7 @@ def build_resume_plan(status, selected_steps, sub_options, output, accession, ar
         "tar_serialize": selected_steps.get("bagging", False) and sub_options.get("tar", False)
                          and sub_options.get("profile") == "aptrust",
     }
+    confirmed_stale = sub_options.get("confirmed_stale", False)
     rerun = sub_options.get("rerun_completed", False)
     decisions = {}
     for stage in STAGE_IDS:
@@ -953,7 +953,7 @@ def build_resume_plan(status, selected_steps, sub_options, output, accession, ar
                     if rerun and stage in SAFE_RERUN:
                         action, reason = "run", "explicit_safe_rerun"
                     elif record["freshness"]["state"] == "stale":
-                        action, reason = ("run" if stage in SAFE_RERUN and outcome in ACCEPTABLE[stage] else "review"), "recorded_stale"
+                        action, reason = ("run" if stage in SAFE_RERUN else "review"), "recorded_stale"
                     elif outcome not in ACCEPTABLE[stage]:
                         action, reason = "review", "outcome_not_satisfied"
                     elif available["recorded"][stage] and (stage not in ("bag_construct", "bag_validate") or available["bag"]):
@@ -962,6 +962,10 @@ def build_resume_plan(status, selected_steps, sub_options, output, accession, ar
                         action, reason = "review", "completed_outputs_missing_or_ambiguous"
                     else:
                         action, reason = "run", "completed_outputs_missing"
+            if (stage == "ingest" and record is not None and record["state"] == "completed"
+                    and record["freshness"]["state"] == "stale" and confirmed_stale
+                    and available["xml"] and available["payload"]):
+                action, reason = "skip", "preserve_existing_accession"
             if stage == "antivirus" and action == "reuse":
                 result = record["result"]
                 if result.get("error_count") != 0 or result.get("detection_count") != 0 or result.get("scanned_count") is None:
@@ -994,7 +998,7 @@ def build_resume_plan(status, selected_steps, sub_options, output, accession, ar
     dependency("reports", "fits", available["xml"] or decisions["ingest"]["action"] == "run")
     dependency("summary", "reports", available["csv"])
     for stage in ("fits", "fixity"):
-        if decisions[stage]["action"] == "run" and decisions["ingest"]["action"] != "run" and available["layout"] != "unbagged":
+        if decisions[stage]["action"] == "run" and decisions["ingest"]["action"] != "run" and available["layout"] not in ("unbagged", "bagged"):
             decisions[stage].update(action="block", reason="unbagged_payload_required")
     if decisions["ingest"]["action"] == "run" and status and (available["xml"] or available["bag"]):
         decisions["ingest"].update(action="review", reason="existing_preservation_baseline")

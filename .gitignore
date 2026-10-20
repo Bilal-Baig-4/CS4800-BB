@@ -6,3 +6,4 @@ venv/
 verification-output/
 .vscode/
 *.log
+tests/

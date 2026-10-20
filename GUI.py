@@ -13,7 +13,7 @@ from lxml import etree as ET
 from pipeline_state import RunRecorder, file_count, fixity_result
 import pipeline_state as pipeline_status
 from pipeline_state import summarize_user_steps, format_stage_details
-from pipeline_state import build_resume_plan, bag_layout
+from pipeline_state import build_resume_plan, bag_layout, resolve_payload_root
 from pipeline_state import load_reconciled_status
 
 from pipeline import (
@@ -142,9 +142,9 @@ def selected_run_options():
 
 def require_unbagged(payload, operation):
     if not payload.is_dir():
-        raise ValueError(f"{operation} requires an existing accession payload directory: {payload}")
+        raise ValueError(f"{operation} requires an existing accession directory: {payload}")
     if bag_layout(payload) != "unbagged":
-        raise ValueError(f"{operation} requires an unbagged payload. Existing or ambiguous "
+        raise ValueError(f"{operation} requires accession files that have not been bagged. Existing or ambiguous "
                          "BagIt layouts are unsupported; no recovery or rebuild is attempted.")
 
 
@@ -175,7 +175,7 @@ def require_accession_xml(xml, accession, payload=None, operation="Reports"):
                 raise ValueError(f"{operation}: baseline path escapes the accession: {name}")
             if operation == "Format Identification":
                 if not file_path.is_file():
-                    raise ValueError(f"Format Identification requires payload file: {file_path}")
+                    raise ValueError(f"Format Identification requires accession file: {file_path}")
                 if record.find("{info:lc/xmlns/premis-v2}object/"
                                "{info:lc/xmlns/premis-v2}objectCharacteristics") is None:
                     raise ValueError(f"Format Identification requires baseline PREMIS metadata: {name}")
@@ -210,15 +210,14 @@ def validate_selected_run(options, allow_no_steps=False):
             raise ValueError("Ingest requires an existing Input Directory.")
         source = Path(options["input"]).resolve()
         if payload.resolve().is_relative_to(source) or source.is_relative_to(payload.resolve()):
-            raise ValueError("Input Directory and accession payload must not contain one another.")
+            raise ValueError("Input Directory and accession directory must not contain one another.")
         if payload.exists():
             require_unbagged(payload, "Ingest")
     for key, label in (("fits", "Format Identification"), ("reports", "Reports"),
                        ("fixity", "Fixity")):
         if steps[key] and not steps["ingest"]:
-            if key != "reports":
-                require_unbagged(payload, label)
-            require_accession_xml(xml, accession, payload if key != "reports" else None, label)
+            root = resolve_payload_root(payload, bag_layout(payload)) if key != "reports" else None
+            require_accession_xml(xml, accession, root, label)
     if steps["reports"]:
         for stylesheet in ("files.csv.xslt", "files.html.xslt"):
             if not (XSLT_DIR / stylesheet).is_file():
@@ -418,6 +417,43 @@ def show_status_details():
     text.configure(state="disabled")
 
 
+def report_processing_error(exc, step, log_path=None, *, title="Processing Error",
+                            show_popup=True, details=""):
+    """Retain diagnostics independently of the accession's writable status file."""
+    global latest_error
+    latest_error = (
+        f"Failed step: {step}\n\nException: {type(exc).__name__}: {exc}\n\n"
+        f"Log file: {log_path if log_path else 'Unavailable (logging was not initialized)'}\n\n"
+        f"{details}\n\nTraceback:\n{traceback.format_exc()}"
+    )
+    # Store first: logging, popup dismissal, and history refresh must not lose it.
+    try:
+        logging.error("Selected processing failed.\n%s", latest_error)
+    except Exception:
+        pass  # Diagnostics remain available even when the log cannot be written.
+    error_details_button.config(state="normal")
+    status_var.set("Processing failed; select View Error Details.")
+    if show_popup:
+        summary = str(exc).splitlines()[0][:400]
+        messagebox.showerror(title, f"{step}\n\n{summary}\n\n"
+                             "Select View Error Details to reopen the full error.")
+
+
+def show_error_details():
+    if latest_error is None:
+        return
+    dialog = tk.Toplevel(root)
+    dialog.title("Processing Details")
+    dialog.transient(root)
+    text = tk.Text(dialog, width=75, height=24, wrap="word")
+    scroll = ttk.Scrollbar(dialog, command=text.yview)
+    text.configure(yscrollcommand=scroll.set)
+    scroll.pack(side="right", fill="y")
+    text.pack(side="left", fill="both", expand=True)
+    text.insert("1.0", latest_error)
+    text.configure(state="disabled")
+
+
 def prepare_execution_plan(options):
     if not any(options["steps"].values()):
         raise ValueError("Select at least one processing step.")
@@ -427,6 +463,7 @@ def prepare_execution_plan(options):
         status = load_reconciled_status(options["output"], options["accession"])
     except FileNotFoundError:
         status = None
+    options["_status_snapshot"] = status
     options["_managed_status_exists"] = status is not None
     plan = build_resume_plan(status, options["steps"], options, options["output"], options["accession"])
     return plan
@@ -497,8 +534,8 @@ def format_run_confirmation(plan, options):
             reason = item["reason"]
             warning = warnings.get(reason)
             if reason == "recorded_stale" or "freshness_reasons" in item:
-                stale = ("Outputs have changed; affected work will run again." if item["action"] == "run"
-                         else "Outputs have changed; review them before continuing.")
+                stale = ("Previous results may no longer be current; affected work will run again." if item["action"] == "run"
+                         else "Previous results may no longer be current; review them before continuing.")
                 attention.append(f"{heading}: {labels[item['stage']]} — {stale}")
             if reason.endswith("_requires_review"):
                 producer = reason.removesuffix("_requires_review")
@@ -539,10 +576,163 @@ def format_run_confirmation(plan, options):
     return "\n".join(lines)
 
 
-def confirm_run(message):
+def processing_groups():
+    return (
+        ("ingest", "Step 1 - Ingest", ("antivirus", "ingest")),
+        ("fits", "Step 2 - Format Identification", ("fits",)),
+        ("reports", "Step 3 - Reports", ("reports", "summary")),
+        ("fixity", "Step 4 - Fixity", ("fixity",)),
+        ("bagging", "Step 5 - Bagging", ("bag_construct", "bag_validate", "tar_serialize")),
+    )
+
+
+def stale_bagging_steps(options, plan):
+    """Use reconciled planner evidence, excluding work this run will refresh."""
+    if not options["steps"].get("bagging"):
+        return []
+    return [item for item in plan if item["stage"] in
+            ("ingest", "fits", "reports", "summary", "fixity")
+            and "freshness_reasons" in item and item["action"] != "run"]
+
+
+def affected_step_names(items):
+    stages = {item["stage"] for item in items}
+    return [label for _, label, members in processing_groups() if stages.intersection(members)]
+
+
+def prerequisite_summary(exc, plan):
+    blocked = [item for item in plan if item["action"] in ("review", "block")]
+    if isinstance(exc, OSError) or not blocked:
+        return str(exc).splitlines()[0][:400]
+    reasons = {item["reason"] for item in blocked}
+    if "unbagged_payload_required" in reasons:
+        summary = "Selected steps require an unbagged working copy of the accession."
+    elif reasons.intersection({"previous_attempt_may_be_interrupted", "unsafe_automatic_retry",
+                               "existing_preservation_baseline", "unknown_history"}):
+        summary = "Previous processing or an existing accession needs manual review before continuing."
+    elif "managed_fixity_findings_require_passing_rerun" in reasons:
+        summary = "Fixity findings must be resolved before bagging."
+    elif "recorded_stale" in reasons:
+        summary = "Some previous processing results are no longer current."
+    else:
+        summary = "Selected processing has missing or unresolved prerequisites."
+    names = affected_step_names(blocked)
+    return summary + f"\n\nAffected steps ({len(names)}):\n" + "\n".join(names)
+
+
+def propose_rerun(options, plan):
+    """Ask the existing planner which upstream work needs attention; never force Ingest."""
+    proposed = dict(options)
+    proposed["steps"] = dict(options["steps"])
+    proposed["rerun_completed"] = True
+    targets = {item["stage"] for item in plan if "freshness_reasons" in item
+               and item["stage"] in ("fits", "reports", "summary", "fixity")}
+    targets.update(item["stage"] for item in plan if item["action"] in ("review", "block"))
+    manual = set()
+    selected = set()
+    for _ in range(len(pipeline_status.STAGE_IDS)):
+        for stage in targets:
+            if stage not in pipeline_status.SAFE_RERUN:
+                manual.add(stage)
+                continue
+            for key, _, members in processing_groups():
+                if stage in members and key != "bagging":
+                    proposed["steps"][key] = True
+                    selected.add(key)
+        candidate = build_resume_plan(options.get("_status_snapshot"), proposed["steps"], proposed,
+                                      options["output"], options["accession"])
+        upstream = set()
+        for item in candidate:
+            if item["action"] not in ("review", "block"):
+                continue
+            reason = item["reason"]
+            for stage in pipeline_status.STAGE_IDS:
+                if reason in (f"{stage}_requires_review", f"missing_{stage}_prerequisite"):
+                    upstream.add(stage)
+            if reason in ("managed_fixity_findings_require_passing_rerun", "successful_validation_required"):
+                upstream.add("fixity" if reason.startswith("managed") else "bag_validate")
+        if upstream.issubset(targets):
+            break
+        targets.update(upstream)
+    unresolved = [item for item in candidate if item["action"] in ("review", "block")]
+    unresolved_stages = {item["stage"] for item in unresolved}
+    manual = {stage for stage in manual if stage == "ingest" or stage in unresolved_stages}
+    return proposed, selected, manual, unresolved
+
+
+def review_rerun_steps(options, plan):
+    proposed, selected, manual, unresolved = propose_rerun(options, plan)
+    proposed["confirmed_stale"] = True
+    proposed["steps"]["bagging"] = False
+    # A stale inventory describes the existing accession; never recopy the source.
+    snapshot = options.get("_status_snapshot")
+    if snapshot and snapshot["steps"]["ingest"]["freshness"]["state"] == "stale":
+        proposed["steps"]["ingest"] = False
+    candidate = build_resume_plan(snapshot, proposed["steps"], proposed,
+                                  options["output"], options["accession"])
+    validate_execution_plan(proposed, candidate)
+    names = affected_step_names([item for item in candidate if item["action"] == "run"])
+    if not names:
+        return None
+    message = ("Some files or processing settings have changed since this accession was last processed."
+               "\n\nThe affected processing steps will be run again."
+               "\n\nBefore continuing, make sure the files in the accession are the files you want to process.")
+    if (snapshot and snapshot["steps"]["ingest"]["state"] == "completed"
+            and snapshot["steps"]["ingest"]["freshness"]["state"] == "stale"
+            and not proposed["steps"]["ingest"]):
+        message += "\n\nStep 1 - Ingest will not run again because the accession has already been created."
+    message += "\n\nSteps to rerun:\n" + "\n".join(names)
+    if bag_layout(Path(options["output"]) / options["accession"]) == "bagged":
+        message += ("\n\nFiles in this packaged accession have changed. Reprocessing can update format, "
+                    "report, and fixity results, but the existing BagIt package may also need to be "
+                    "validated or rebuilt.")
+    message += "\n\nRerun these steps?"
+    if not confirm_run(message, title="Rerun Changed Processing", run_label="Rerun Steps"):
+        return None
+    variables = dict(ingest=run_ingest, fits=run_format_identification,
+                     reports=run_reports, fixity=run_fixity_selected, bagging=run_bagging)
+    for key, variable in variables.items():
+        variable.set(proposed["steps"][key])
+    rerun_completed_var.set(True)
+    return proposed, candidate
+
+
+def processing_review_dialog(title, message, options, plan, *, allow_continue=False, allow_review=True):
+    """Compact summary with full diagnostics in the existing scrollable details view."""
+    dialog = tk.Toplevel(root)
+    dialog.title(title)
+    dialog.transient(root)
+    choice = "cancel"
+
+    def finish(value):
+        nonlocal choice
+        choice = value
+        dialog.destroy()
+
+    frame = ttk.Frame(dialog, padding=16)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=message, wraplength=520, justify="left").pack(anchor="w")
+    buttons = ttk.Frame(frame)
+    buttons.pack(anchor="e", pady=(16, 0))
+    ttk.Button(buttons, text="View Details", command=show_error_details).pack(side="left", padx=4)
+    if allow_review:
+        ttk.Button(buttons, text="Rerun Steps", command=lambda: finish("review")).pack(side="left", padx=4)
+    if allow_continue:
+        ttk.Button(buttons, text="Continue Anyway", command=lambda: finish("continue")).pack(side="left", padx=4)
+    cancel = ttk.Button(buttons, text="Cancel", command=lambda: finish("cancel"))
+    cancel.pack(side="left", padx=4)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: finish("cancel"))
+    dialog.bind("<Escape>", lambda event: finish("cancel"))
+    dialog.grab_set()
+    cancel.focus_set()
+    root.wait_window(dialog)
+    return choice
+
+
+def confirm_run(message, *, title="Confirm Run", run_label="Run"):
     """Modal confirmation with explicit Run and Cancel buttons."""
     dialog = tk.Toplevel(root)
-    dialog.title("Confirm Run")
+    dialog.title(title)
     dialog.transient(root)
     confirmed = False
 
@@ -556,7 +746,7 @@ def confirm_run(message):
     ttk.Label(frame, text=message, wraplength=580, justify="left").pack(anchor="w")
     buttons = ttk.Frame(frame)
     buttons.pack(anchor="e", pady=(16, 0))
-    ttk.Button(buttons, text="Run", command=lambda: finish(True)).pack(side="left", padx=(0, 8))
+    ttk.Button(buttons, text=run_label, command=lambda: finish(True)).pack(side="left", padx=(0, 8))
     cancel = ttk.Button(buttons, text="Cancel", command=finish)
     cancel.pack(side="left")
     dialog.protocol("WM_DELETE_WINDOW", finish)
@@ -572,8 +762,7 @@ def validate_execution_plan(options, plan):
         # Keep established selective prerequisites/diagnostics for first managed runs.
         validate_selected_run(options)
     if any(item["action"] in ("review", "block") for item in plan):
-        raise ValueError(format_run_confirmation(plan, options) +
-                         "\n\nProcessing will not start. Review the warnings and Status Details before continuing.")
+        raise ValueError("Selected processing has unresolved prerequisites.")
     actions = {item["stage"]: item["action"] for item in plan}
     effective = dict(options)
     effective["steps"] = dict(ingest=actions["ingest"] == "run", fits=actions["fits"] == "run",
@@ -593,6 +782,13 @@ def run_pipeline(options=None, plan=None):
     payload = out_dir / accession
     xml = out_dir / f"{accession}.xml"
     log_path = None
+    current_step = "Preparing processing (before processing starts)"
+
+    def run_stage(stage, *args, **kwargs):
+        nonlocal current_step
+        current_step = pipeline_status.STAGE_NAMES[stage]
+        return recorder.run(stage, *args, **kwargs)
+
     infected_files = {}
     bag_valid = None
     tar_path = None
@@ -605,21 +801,23 @@ def run_pipeline(options=None, plan=None):
         actions = {item["stage"]: item["action"] for item in plan}
         should_run = lambda stage: actions[stage] == "run"
         out_dir.mkdir(parents=True, exist_ok=True)
-        recorder = RunRecorder(out_dir, accession)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = out_dir / f"pipeline_log_{accession}_{timestamp}.log"
+        current_step = "Initializing processing log (before processing starts)"
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
         logging.basicConfig(filename=log_path, level=logging.INFO,
                             format="%(asctime)s - %(levelname)s - %(message)s", filemode="w",
                             encoding="utf-8")
+        current_step = "Initializing accession status (before processing starts)"
+        recorder = RunRecorder(out_dir, accession)
         logging.info("Selected processing started: %s", ", ".join(k for k, v in steps.items() if v))
         if should_run("antivirus") or should_run("ingest"):
             clean_files = None
             if should_run("antivirus"):
                 import pipeline as pipeline_module
                 if not pipeline_module.AV_AVAILABLE:
-                    recorder.run("antivirus", lambda: None, lambda _: dict(
+                    run_stage("antivirus", lambda: None, lambda _: dict(
                         state="failed", outcome="unavailable", message="Microsoft Defender unavailable.",
                         result=dict(scanned_count=0, detection_count=None, error_count=None)),
                         settings={"requested": True})
@@ -645,7 +843,7 @@ def run_pipeline(options=None, plan=None):
                             result["message"] = "Microsoft Defender verification unavailable."
                         return result
 
-                    clean_files, infected_files, skipped = recorder.run(
+                    clean_files, infected_files, skipped = run_stage(
                         "antivirus", lambda: run_antivirus_scan(options["input"], out_dir, accession,
                                                                 result_callback=scan_observation.update),
                         scan_result, settings={"requested": True})
@@ -663,7 +861,7 @@ def run_pipeline(options=None, plan=None):
                         clean_files = None
             if should_run("ingest"):
                 status_var.set("Running Ingest...")
-                xml = Path(recorder.run("ingest", lambda: ingest_accession(
+                xml = Path(run_stage("ingest", lambda: ingest_accession(
                 options["input"], out_dir, accession, move_files=options["move"],
                 clean_files_only=clean_files if infected_files else None,
                 progress_callback=lambda current, total, name: root.after(
@@ -673,17 +871,19 @@ def run_pipeline(options=None, plan=None):
                                   outputs=recorder.paths(payload=payload, xml=path)),
                 settings={"move_files": options["move"]}, layout="unbagged"))
         if should_run("fits"):
-            require_unbagged(payload, "Format Identification")
-            require_accession_xml(xml, accession, payload, "Format Identification")
+            current_step = "Format Identification"
+            payload_root = resolve_payload_root(payload, bag_layout(payload))
+            require_accession_xml(xml, accession, payload_root, "Format Identification")
             status_var.set("Running Format Identification...")
             fits_observation = {}
-            recorder.run("fits", lambda: enrich_accession_with_fits(payload, xml,
+            run_stage("fits", lambda: enrich_accession_with_fits(payload, xml,
                 progress_callback=lambda current, total, name: root.after(
                     0, status_var.set, f"Format Identification: {current}/{total}: {name}"),
                 result_callback=fits_observation.update),
                 lambda _: dict(outcome=fits_observation.get("outcome", "processed"),
                                outputs=recorder.paths(xml=xml), result=fits_observation))
         if should_run("reports") or should_run("summary"):
+            current_step = "Reports"
             if should_run("reports"):
                 require_accession_xml(xml, accession)
             status_var.set("Generating Reports...")
@@ -698,19 +898,21 @@ def run_pipeline(options=None, plan=None):
                 report_progress["html_generated"] = True
 
             if should_run("reports"):
-                recorder.run("reports", generate_reports,
+                run_stage("reports", generate_reports,
                          lambda _: dict(outcome="generated", result=dict(report_progress),
                                         outputs=recorder.paths(csv=csv, html=html)), progress=report_progress)
             if should_run("summary"):
-                recorder.run("summary", lambda: generate_summary_report(csv, out_dir, accession),
+                run_stage("summary", lambda: generate_summary_report(csv, out_dir, accession),
                          lambda _: dict(outcome="generated", outputs=recorder.paths(text=out_dir / f"{accession}.txt")))
         if should_run("fixity"):
-            require_unbagged(payload, "Fixity")
-            require_accession_xml(xml, accession, payload, "Fixity")
+            current_step = "Fixity"
+            payload_root = resolve_payload_root(payload, bag_layout(payload))
+            require_accession_xml(xml, accession, payload_root, "Fixity")
             status_var.set("Running Fixity...")
-            recorder.run("fixity", lambda: run_fixity(xml, out_dir, accession),
+            run_stage("fixity", lambda: run_fixity(xml, out_dir, accession),
                          lambda result: fixity_result(recorder, result))
         if any(should_run(s) for s in ("bag_construct", "bag_validate", "tar_serialize")):
+            current_step = "Bagging"
             if recorder.status["steps"]["fixity"]["outcome"] == "findings":
                 raise ValueError("Managed fixity findings block Bagging. Explicitly rerun Fixity and obtain a passing result.")
             if any(item.get("requires_passing_fixity") for item in plan) and recorder.status["steps"]["fixity"]["outcome"] != "passed":
@@ -724,7 +926,7 @@ def run_pipeline(options=None, plan=None):
                     handler.close()
                     logging.root.removeHandler(handler)
                 try:
-                    bag_path = recorder.run("bag_construct", lambda: construct_bag(payload, accession, profile=options["profile"],
+                    bag_path = run_stage("bag_construct", lambda: construct_bag(payload, accession, profile=options["profile"],
                                              xml_manifest=xml if xml.exists() else None,
                                              **options["metadata"]),
                         lambda path: dict(outcome="constructed", outputs=recorder.paths(
@@ -749,14 +951,14 @@ def run_pipeline(options=None, plan=None):
                     result.setdefault("valid", valid)
                     return dict(state=state, outcome=outcome, result=result, message=message[:2000])
 
-                bag_valid, error = recorder.run("bag_validate", lambda: validate_bag(
+                bag_valid, error = run_stage("bag_validate", lambda: validate_bag(
                     bag_path, result_callback=validation_observation.update), validation_result,
                     failure_outcome="indeterminate")
                 if not bag_valid:
                     raise ValueError(f"Bag validation failed; TAR serialization blocked: {error}")
             if should_run("tar_serialize"):
                 status_var.set("Serializing TAR...")
-                tar_path = recorder.run("tar_serialize", lambda: serialize_bag_to_tar(bag_path),
+                tar_path = run_stage("tar_serialize", lambda: serialize_bag_to_tar(bag_path),
                                         lambda path: dict(outcome="serialized", outputs=recorder.paths(tar=path)))
         status_var.set("Selected processing steps completed.")
         logging.info("Selected processing steps completed.")
@@ -770,9 +972,9 @@ def run_pipeline(options=None, plan=None):
         summary.append(f"Log file:\n{log_path}")
         messagebox.showinfo("Processing Complete", "\n".join(summary))
     except Exception as exc:
-        logging.error("Selected processing failed.\n" + traceback.format_exc())
-        status_var.set("Processing failed; see error details.")
-        messagebox.showerror("Processing Error", f"{exc}" + (f"\n\nLog file:\n{log_path}" if log_path else ""))
+        details = (pipeline_status.format_execution_plan(plan) + "\n\n" + json.dumps(plan, indent=2)
+                   if plan else "")
+        report_processing_error(exc, current_step, log_path, details=details)
     finally:
         restore_run_controls()
         # Reload the durable file on the Tk thread, including failed final writes.
@@ -782,14 +984,45 @@ def run_pipeline(options=None, plan=None):
 def start_pipeline():
     cancel_status_refresh()
     options = selected_run_options()
+    plan = []
+    confirmed = False
     try:
         plan = prepare_execution_plan(options)
+        stale = [item for item in plan if "freshness_reasons" in item
+                 and item["stage"] in ("ingest", "fits", "reports", "summary", "fixity")
+                 and (item["reason"] != "not_requested" or options["steps"].get("bagging"))]
+        if stale:
+            summary = ("Earlier processing results may be outdated.\n\nAffected steps:\n" +
+                       "\n".join(affected_step_names(stale)))
+            choice = processing_review_dialog("Processing Results Have Changed", summary,
+                options, plan, allow_continue=False)
+            if choice != "review":
+                return
+            result = review_rerun_steps(options, plan)
+            if result is None:
+                return
+            options, plan = result
+            confirmed = True
         validate_execution_plan(options, plan)
     except (ValueError, OSError) as exc:
-        status_var.set("Processing not started; check prerequisites.")
-        messagebox.showerror("Processing Cannot Start", str(exc))
-        return
-    if not confirm_run(format_run_confirmation(plan, options)):
+        details = (pipeline_status.format_execution_plan(plan) + "\n\nOriginal prerequisite decisions:\n" +
+                   json.dumps(plan, indent=2)) if plan else ""
+        report_processing_error(exc, "Checking prerequisites (before processing starts)",
+                                title="Processing Cannot Start", show_popup=False, details=details)
+        choice = processing_review_dialog("Processing Cannot Start", prerequisite_summary(exc, plan),
+                                 options, plan, allow_review=not isinstance(exc, OSError) and bool(plan))
+        if choice != "review":
+            return
+        try:
+            result = review_rerun_steps(options, plan)
+            if result is None:
+                return
+            options, plan = result
+            confirmed = True
+        except (ValueError, OSError) as rerun_error:
+            report_processing_error(rerun_error, "Checking rerun prerequisites (before processing starts)")
+            return
+    if not confirmed and not confirm_run(format_run_confirmation(plan, options)):
         return
     status_var.set("Starting selected processing...")
     run_button.config(state="disabled")
@@ -797,9 +1030,9 @@ def start_pipeline():
     progress_bar.start(10)
     try:
         threading.Thread(target=run_pipeline, args=(options, plan), daemon=True).start()
-    except Exception:
+    except Exception as exc:
         restore_run_controls()
-        raise
+        report_processing_error(exc, "Starting processing worker (before processing starts)")
 
 
 # ==========================
@@ -856,6 +1089,7 @@ run_bagging = tk.BooleanVar(value=True)
 rerun_completed_var = tk.BooleanVar(value=False)
 inputs_locked = False
 loaded_history = None
+latest_error = None
 details_window = None
 pending_status_refresh = None
 step_history_vars = {name: tk.StringVar(value="Not Loaded") for name in
@@ -1067,6 +1301,10 @@ toggle_bag_fields()
 # Status
 tk.Label(root, textvariable=status_var, anchor="w", fg="blue").grid(
     row=5, column=0, columnspan=3, sticky="w", padx=10, pady=3)
+
+error_details_button = tk.Button(root, text="View Error Details",
+                                 command=show_error_details, state="disabled")
+error_details_button.grid(row=6, column=2, padx=10, pady=6, sticky="e")
 
 # Run button
 run_button = tk.Button(root, text="Run Selected Steps", command=start_pipeline,

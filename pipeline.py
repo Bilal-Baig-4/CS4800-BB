@@ -597,17 +597,18 @@ def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
                                fits_workers=2, progress_callback=None, result_callback=None):
     """Enrich an existing inventory in place without transferring or hashing.
 
-    accession_folder is the unbagged payload root. Only files listed in XML
+    accession_folder is the accession directory, optionally already bagged. Only files listed in XML
     are identified. Successful results replace prior FITS-derived formats and
     FITS extension trees; failed files retain all existing metadata. Baseline
     attributes, UUIDs, fixity, size and unrelated metadata are left untouched.
     Returns xml_input. Optional result_callback receives per-attempt counts and
     outcome; historical XML is never used to infer this attempt's success.
-    No status tracking or post-bag path discovery is done.
+    Bagged accessions resolve logical inventory paths under data/.
     """
     if fits_workers not in (1, 2):
         raise ValueError("fits_workers must be 1 or 2")
-    accession_folder = Path(accession_folder).resolve()
+    from pipeline_state import bag_layout, resolve_payload_root
+    accession_folder = resolve_payload_root(accession_folder, bag_layout(accession_folder)).resolve()
     xml_input = Path(xml_input)
     tree = LET.parse(str(xml_input), LET.XMLParser(resolve_entities=False, no_network=True))
     files = tree.findall(".//{http://dataaccessioner.org/schema/dda-1-1}file")
@@ -675,7 +676,7 @@ def enrich_accession_with_fits(accession_folder, xml_input, fits_home=None,
                     dest_path = dest_path.resolve()
                     dest_path.relative_to(accession_folder)
                     if not dest_path.is_file():
-                        raise FileNotFoundError(f"Payload file missing: {dest_path}")
+                        raise FileNotFoundError(f"Accession file missing: {dest_path}")
                     if file_el.find(f"{{{PREMIS_NS}}}object/{{{PREMIS_NS}}}objectCharacteristics") is None:
                         raise ValueError("File record has no baseline PREMIS characteristics")
                     stat = dest_path.stat()
@@ -871,17 +872,17 @@ def _bag_preflight(accession_folder, accession_number, contact_name, contact_ema
             path = Path(directory) / name
             rel = path.relative_to(root).as_posix()
             if path.is_symlink() or path.is_junction():
-                raise ValueError(f"Payload links/junctions are not supported: {rel}")
+                raise ValueError(f"Links/junctions in accession files are not supported: {rel}")
             if any(c in rel for c in "\r\n\\%") or any(part != part.strip() for part in rel.split("/")):
                 raise ValueError(f"Unsupported manifest path: {rel!r}")
             rel.encode("utf-8")
             if rel.casefold() in seen:
-                raise ValueError(f"Case-insensitive payload path collision: {rel}")
+                raise ValueError(f"Case-insensitive accession file path collision: {rel}")
             seen.add(rel.casefold())
             if path.is_file():
                 payload[rel] = path
             elif not path.is_dir():
-                raise ValueError(f"Unsupported payload entry: {rel}")
+                raise ValueError(f"Unsupported accession entry: {rel}")
 
     baseline = None
     if xml_manifest is not None:
@@ -905,15 +906,15 @@ def _bag_preflight(accession_folder, accession_number, contact_name, contact_ema
         missing = sorted(set(baseline) - set(payload))
         extra = sorted(set(payload) - set(baseline))
         if missing or extra:
-            raise ValueError(f"Payload differs from XML baseline; missing={missing}; unexpected={extra}")
+            raise ValueError(f"Accession contents differ from XML baseline; missing={missing}; unexpected={extra}")
 
     checksums = {}
     for rel, path in sorted(payload.items()):
         digest = compute_sha256(path)
         if baseline is not None and compute_checksum(path, baseline[rel][0]) != baseline[rel][1]:
-            raise ValueError(f"Baseline checksum mismatch: {rel}. Construction refused before payload movement.")
+            raise ValueError(f"Baseline checksum mismatch: {rel}. Construction refused before moving accession files.")
         checksums[rel] = digest
-    logging.info("BagIt preflight passed: %d payload files; %s.", len(checksums),
+    logging.info("BagIt preflight passed: %d accession files; %s.", len(checksums),
                  "XML baseline verified" if baseline is not None else "fresh SHA-256 digests (no XML baseline supplied)")
     return root, entries, checksums
 
@@ -952,7 +953,7 @@ def construct_bag(accession_folder, accession_number, contact_name="", contact_e
         for item in entries:
             destination = data_dir / item.name
             if os.path.lexists(destination):
-                raise FileExistsError(f"Payload destination already exists: {destination}")
+                raise FileExistsError(f"Accession file destination already exists: {destination}")
             shutil.move(str(item), str(destination))
         (root / "bagit.txt").write_text(
             "BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n", encoding="utf-8")
@@ -1075,12 +1076,13 @@ def validate_bag(bag_path, result_callback=None):
 def run_fixity(xml_input, output_folder, accession_number):
     """
     Verify algorithm-identified checksums recorded in the XML manifest against files on disk.
-    Always runs before BagIt packaging, so files are always directly inside
-    the accession folder (never in a data/ subdirectory at this point).
+    Resolve logical inventory paths inside data/ for an existing BagIt package.
     Writes a CSV report and log file to output_folder.
     """
     output_folder    = Path(output_folder)
-    accession_folder = output_folder / accession_number
+    from pipeline_state import bag_layout, resolve_payload_root
+    accession = output_folder / accession_number
+    accession_folder = resolve_payload_root(accession, bag_layout(accession))
 
     log_file = output_folder / f"fixity_{accession_number}.log"
     csv_file = output_folder / f"fixity_{accession_number}.csv"
