@@ -36,8 +36,7 @@ See [Installation](install/INSTALLATION.md) to install dependencies and run the 
       <img width="1780" height="193" alt="image" src="https://github.com/user-attachments/assets/77c7f8d0-6a58-4055-b66a-3265235e2fa6" />
 
     - HTML:
-      <img width="971" height="691" alt="Screenshot 2025-12-08 131635" src="https://github.com/user-attachments/assets/5a1a1d4b-b57a-470d-8ebb-58ef80b411c2" />
-
+      <img width="1067" height="753" alt="image" src="https://github.com/user-attachments/assets/5d7a0d46-17ff-4af4-b8e2-a08285e9ab39" />
 
 ## Fixity Verification
 - Uses Python's `hashlib` to validate file checksums against the accession metadata
