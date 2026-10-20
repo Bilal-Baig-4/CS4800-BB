@@ -15,7 +15,8 @@ See [Installation](install/INSTALLATION.md) to install dependencies and run the 
     - Generates SHA-256 checksums and XML/PREMIS metadata
     - Recreates the full directory structure from the input directory
 - Sample output:
-  <img width="1575" height="637" alt="Screenshot 2025-12-08 131822" src="https://github.com/user-attachments/assets/29061578-5ba5-47dd-8a93-fface00b151b" />
+  <img width="1851" height="961" alt="image" src="https://github.com/user-attachments/assets/ab99a52b-f137-463c-a2c8-50fc3f217ce1" />
+
 
 
 ## FITS
