@@ -47,8 +47,8 @@ See [Installation](install/INSTALLATION.md) to install dependencies and run the 
 - Historical MD5 accessions remain verifiable using their recorded checksums.
 - Sample output
     - CSV:
-      <img width="1725" height="296" alt="Screenshot 2025-12-08 132042" src="https://github.com/user-attachments/assets/5d8979f0-9566-40ac-a520-ea1b2388d696" />
-
+      <img width="1835" height="187" alt="image" src="https://github.com/user-attachments/assets/ffa76b3e-831a-4ee8-b93e-696a1bee9067" />
+      
     - Log:
       <img width="1856" height="466" alt="Screenshot 2025-12-08 132132" src="https://github.com/user-attachments/assets/c4ef74c0-e006-4ced-b952-62ab97164c75" />
 
