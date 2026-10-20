@@ -50,21 +50,16 @@ See [Installation](install/INSTALLATION.md) to install dependencies and run the 
       <img width="1835" height="187" alt="image" src="https://github.com/user-attachments/assets/ffa76b3e-831a-4ee8-b93e-696a1bee9067" />
       
     - Log:
-      <img width="1856" height="466" alt="Screenshot 2025-12-08 132132" src="https://github.com/user-attachments/assets/c4ef74c0-e006-4ced-b952-62ab97164c75" />
-
+      <img width="1702" height="447" alt="image" src="https://github.com/user-attachments/assets/84d3776e-263b-4120-8636-235ba5fe3c7a" />
 
 ## Virus scanning
 - Uses Microsoft Defender for an optional antivirus scan before ingest.
-
 
 ## Bagging function (optional)
 - Packages files and metadata using BagIt with SHA-256 manifests and tag manifests.
 - Supports generic and APTrust bags.
 - Bag validation and TAR serialization can also be run when needed.
 
-
 ## Resume / Status
 - Processing steps can be selected and run separately.
 - The pipeline keeps a status file so users can return later and continue unfinished processing.
-
-Run regression tests with `python -m unittest discover -s tests -v`.
