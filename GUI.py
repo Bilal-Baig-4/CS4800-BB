@@ -14,9 +14,11 @@ from pipeline_state import RunRecorder, file_count, fixity_result
 import pipeline_state as pipeline_status
 from pipeline_state import summarize_user_steps, format_stage_details
 from pipeline_state import build_resume_plan, bag_layout, resolve_payload_root
-from pipeline_state import load_reconciled_status
+from pipeline_state import load_reconciled_status, document_path, is_managed_documentation, collection_directory
 
 from pipeline import (
+    documentation_dir,
+    new_document,
     ingest_accession,
     stored_checksum,
     enrich_accession_with_fits,
@@ -199,9 +201,9 @@ def validate_selected_run(options, allow_no_steps=False):
              *(f"LPT{i}" for i in range(1, 10))}):
         raise ValueError("Accession Number must be a single safe path component.")
     output = Path(options["output"]).resolve()
-    payload = output / accession
-    xml = output / f"{accession}.xml"
-    if payload.resolve().parent != output or xml.resolve().parent != output:
+    payload = collection_directory(output, accession)
+    xml = document_path(output, accession, "ingest", "xml", f"{accession}.xml")
+    if not payload.resolve().is_relative_to(output) or not xml.resolve().is_relative_to(output):
         raise ValueError("Accession paths must stay inside Output Directory.")
     if output.exists() and not output.is_dir():
         raise ValueError("Output Directory must be a directory.")
@@ -779,8 +781,8 @@ def run_pipeline(options=None, plan=None):
     steps = options["steps"]
     out_dir = Path(options["output"])
     accession = options["accession"]
-    payload = out_dir / accession
-    xml = out_dir / f"{accession}.xml"
+    payload = None
+    xml = None
     log_path = None
     current_step = "Preparing processing (before processing starts)"
 
@@ -801,8 +803,9 @@ def run_pipeline(options=None, plan=None):
         actions = {item["stage"]: item["action"] for item in plan}
         should_run = lambda stage: actions[stage] == "run"
         out_dir.mkdir(parents=True, exist_ok=True)
+        documentation_dir(out_dir, accession)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = out_dir / f"pipeline_log_{accession}_{timestamp}.log"
+        log_path = new_document(out_dir, f"pipeline_log_{accession}_{timestamp}.log", accession)
         current_step = "Initializing processing log (before processing starts)"
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
@@ -810,7 +813,9 @@ def run_pipeline(options=None, plan=None):
                             format="%(asctime)s - %(levelname)s - %(message)s", filemode="w",
                             encoding="utf-8")
         current_step = "Initializing accession status (before processing starts)"
-        recorder = RunRecorder(out_dir, accession)
+        recorder = RunRecorder(out_dir, accession, collection_name=Path(options["input"]).name if options.get("input") else None)
+        payload = collection_directory(out_dir, accession)
+        xml = document_path(out_dir, accession, "ingest", "xml", f"{accession}.xml", recorder.status)
         logging.info("Selected processing started: %s", ", ".join(k for k, v in steps.items() if v))
         if should_run("antivirus") or should_run("ingest"):
             clean_files = None
@@ -887,13 +892,15 @@ def run_pipeline(options=None, plan=None):
             if should_run("reports"):
                 require_accession_xml(xml, accession)
             status_var.set("Generating Reports...")
-            csv = out_dir / f"{accession}_files.csv"
-            html = out_dir / f"{accession}_files.html"
+            csv = (new_document(out_dir, f"{accession}_files.csv", accession) if should_run("reports") else
+                   document_path(out_dir, accession, "reports", "csv", f"{accession}_files.csv"))
+            html = new_document(out_dir, f"{accession}_files.html", accession) if should_run("reports") else None
             report_progress = dict(csv_generated=False, html_generated=False)
 
             def generate_reports():
                 run_xslt_processor(xml, XSLT_DIR / "files.csv.xslt", csv)
                 report_progress["csv_generated"] = True
+                report_progress["csv_path"] = str(csv)
                 run_xslt_processor(xml, XSLT_DIR / "files.html.xslt", html)
                 report_progress["html_generated"] = True
 
@@ -903,7 +910,7 @@ def run_pipeline(options=None, plan=None):
                                         outputs=recorder.paths(csv=csv, html=html)), progress=report_progress)
             if should_run("summary"):
                 run_stage("summary", lambda: generate_summary_report(csv, out_dir, accession),
-                         lambda _: dict(outcome="generated", outputs=recorder.paths(text=out_dir / f"{accession}.txt")))
+                         lambda path: dict(outcome="generated", outputs=recorder.paths(text=path)))
         if should_run("fixity"):
             current_step = "Fixity"
             payload_root = resolve_payload_root(payload, bag_layout(payload))
@@ -958,7 +965,8 @@ def run_pipeline(options=None, plan=None):
                     raise ValueError(f"Bag validation failed; TAR serialization blocked: {error}")
             if should_run("tar_serialize"):
                 status_var.set("Serializing TAR...")
-                tar_path = run_stage("tar_serialize", lambda: serialize_bag_to_tar(bag_path),
+                tar_path = run_stage("tar_serialize", lambda: serialize_bag_to_tar(
+                                        bag_path, overwrite=options.get("rerun_completed", False)),
                                         lambda path: dict(outcome="serialized", outputs=recorder.paths(tar=path)))
         status_var.set("Selected processing steps completed.")
         logging.info("Selected processing steps completed.")
@@ -1069,6 +1077,33 @@ def toggle_bag_fields():
 # GUI SETUP
 # ==========================
 
+def add_step_tooltip(widget, text):
+    """Explain a step on hover without adding height to the form."""
+    popup = None
+
+    def show(_event):
+        nonlocal popup
+        if popup is not None:
+            return
+        popup = tk.Toplevel(widget)
+        popup.wm_overrideredirect(True)
+        popup.wm_geometry(f"+{widget.winfo_rootx() + 20}+{widget.winfo_rooty() + widget.winfo_height()}")
+        tk.Label(popup, text=text, justify="left", wraplength=400,
+                 background="#ffffe0", foreground="black", relief="solid",
+                 borderwidth=1, padx=8, pady=5).pack()
+
+    def hide(_event):
+        nonlocal popup
+        if popup is not None:
+            popup.destroy()
+            popup = None
+
+    widget.bind("<Enter>", show, add="+")
+    widget.bind("<Leave>", hide, add="+")
+    widget.bind("<ButtonPress>", hide, add="+")
+    widget.bind("<Destroy>", hide, add="+")
+
+
 root = tk.Tk()
 root.title("Archival Pipeline")
 root.geometry("700x820")
@@ -1085,7 +1120,7 @@ run_ingest = tk.BooleanVar(value=True)
 run_format_identification = tk.BooleanVar(value=True)
 run_reports = tk.BooleanVar(value=True)
 run_fixity_selected = tk.BooleanVar(value=True)
-run_bagging = tk.BooleanVar(value=True)
+run_bagging = tk.BooleanVar(value=False)
 rerun_completed_var = tk.BooleanVar(value=False)
 inputs_locked = False
 loaded_history = None
@@ -1141,9 +1176,9 @@ ent_accession.grid(row=2, column=1, sticky="w", **pad)
 
 # ---- Five user-facing processing steps ----
 steps_frame = tk.LabelFrame(root, text="Processing Steps", padx=8, pady=4)
-steps_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=10, pady=3)
+steps_frame.grid(row=3, column=0, columnspan=4, sticky="ew", padx=10, pady=3)
 steps_frame.columnconfigure(1, weight=1)
-chk_ingest = tk.Checkbutton(steps_frame, text="Step 1 — Ingest", variable=run_ingest)
+chk_ingest = tk.Checkbutton(steps_frame, text="Step 1 — Ingest (Data Accessioner)", variable=run_ingest)
 chk_ingest.grid(row=0, column=0, sticky="w")
 av_frame = tk.Frame(steps_frame)
 av_frame.grid(row=1, column=0, columnspan=2, sticky="w", padx=22)
@@ -1164,17 +1199,17 @@ tk.Label(av_frame, textvariable=av_status_var, fg="gray",
 chk_move = tk.Checkbutton(av_frame, text="Move files instead of copy", variable=move_var)
 chk_move.grid(row=2, column=0, sticky="w")
 
-chk_format = tk.Checkbutton(steps_frame, text="Step 2 — Format Identification",
+chk_format = tk.Checkbutton(steps_frame, text="Step 2 — Identify File Formats",
                             variable=run_format_identification)
 chk_format.grid(row=2, column=0, sticky="w")
-chk_reports = tk.Checkbutton(steps_frame, text="Step 3 — Reports", variable=run_reports)
+chk_reports = tk.Checkbutton(steps_frame, text="Step 3 — Generate Metadata Reports", variable=run_reports)
 chk_reports.grid(row=3, column=0, sticky="w")
-chk_fixity = tk.Checkbutton(steps_frame, text="Step 4 — Fixity", variable=run_fixity_selected)
+chk_fixity = tk.Checkbutton(steps_frame, text="Step 4 — Verify File Integrity", variable=run_fixity_selected)
 chk_fixity.grid(row=4, column=0, sticky="w")
 
 # BagIt checkbox
-bag_label = ("Step 5 — Bagging (optional)" if BAGIT_AVAILABLE
-             else "Step 5 — Bagging (install bagit-python to enable)")
+bag_label = ("Step 5 — BagIt Packaging (optional)" if BAGIT_AVAILABLE
+             else "Step 5 — BagIt Packaging (optional; install bagit-python to enable)")
 chk_bag = tk.Checkbutton(steps_frame, text=bag_label, variable=run_bagging,
                          state="normal" if BAGIT_AVAILABLE else "disabled")
 chk_bag.grid(row=5, column=0, sticky="w")
@@ -1183,6 +1218,17 @@ for row, name in ((0, "ingest"), (2, "format_identification"), (3, "reports"),
     tk.Label(steps_frame, textvariable=step_history_vars[name], anchor="w",
              justify="left", wraplength=300, fg="gray", font=("TkDefaultFont", 8)).grid(
         row=row, column=1, sticky="w", padx=(8, 0))
+
+# Hover descriptions keep the step controls compact.
+for widget, explanation in (
+    (chk_ingest, "Copies or moves collection files, preserves directory structure, and generates accession metadata. "
+                 "Optional Microsoft Defender scanning generates antivirus reports."),
+    (chk_format, "Identifies file formats and associated technical information using FITS with a DROID-focused configuration."),
+    (chk_reports, "Converts accession metadata into CSV and HTML reports for easier review, and creates a TXT summary."),
+    (chk_fixity, "Verifies file checksums and generates CSV and LOG reports documenting the results."),
+    (chk_bag, "Creates a standardized BagIt preservation package for storage or transfer."),
+):
+    add_step_tooltip(widget, explanation)
 
 # ---- BagIt metadata frame ----
 bag_frame = tk.LabelFrame(steps_frame, text="BagIt Metadata", padx=8, pady=4)
