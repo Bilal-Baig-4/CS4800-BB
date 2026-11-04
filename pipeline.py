@@ -1,4 +1,6 @@
 from pathlib import Path
+from pipeline_state import (documentation_dir, is_managed_documentation, collection_paths, collection_walk,
+                            collection_directory, load_status, create_status)
 import hashlib
 from datetime import datetime
 from lxml import etree as LET
@@ -17,6 +19,23 @@ import json
 import time
 import tempfile
 from copy import deepcopy
+
+# ==========================
+# DOCUMENTATION DESTINATIONS
+# ==========================
+
+def new_document(output, filename, accession_number):
+    """Reserve a fresh name without replacing existing reports or logs."""
+    destination = documentation_dir(output, accession_number) / filename
+    while True:
+        try:
+            with destination.open("x", encoding="utf-8"):
+                pass
+            return destination
+        except FileExistsError:
+            name = Path(filename)
+            destination = destination.parent / f"{name.stem}_{uuid.uuid4().hex}{name.suffix}"
+
 
 # ==========================
 # OPTIONAL DEPENDENCIES
@@ -177,9 +196,9 @@ def run_antivirus_scan(data_directory, output_folder, accession_number, result_c
     Optional result_callback receives this attempt's counts/outcome and only
     successfully written report paths; the existing return tuple is unchanged.
     """
-    data_directory = Path(data_directory)
+    data_directory = Path(data_directory).resolve()
     output_folder = Path(output_folder)
-    all_files = {p for p in data_directory.rglob("*") if p.is_file()}
+    all_files = {p for p in collection_paths(data_directory) if p.is_file()}
     defender_path = DEFENDER_PATH
     if not AV_AVAILABLE or defender_path is None:
         if defender_path is None:
@@ -272,8 +291,8 @@ def run_antivirus_scan(data_directory, output_folder, accession_number, result_c
         f"Files flagged: {len(infected_files)}\nScan errors: {counts['SCAN_ERROR']}\n"
         f"Google-native placeholders skipped: {counts['SKIPPED_CLOUD_NATIVE']}\n\n"
     )
-    av_csv_file = output_folder / f"antivirus_{accession_number}.csv"
-    av_log_file = output_folder / f"antivirus_{accession_number}.log"
+    av_csv_file = new_document(output_folder, f"antivirus_{accession_number}.csv", accession_number)
+    av_log_file = new_document(output_folder, f"antivirus_{accession_number}.log", accession_number)
     written_outputs = {}
     try:
         output_folder.mkdir(parents=True, exist_ok=True)
@@ -457,18 +476,18 @@ def add_object_characteristics(premis_obj, checksum, size, fits_result=None):
 def generate_data_accessioner_xml(data_directory, output_folder, accession_number,
                                   move_files=False, clean_files_only=None, fits_home=None,
                                   fits_workers=2, progress_callback=None):
-    """Compatibility entry point: ingest, then enrich the saved XML with FITS.
+    """Ingest, then enrich the saved XML with FITS.
 
     Use ingest_accession() for baseline-only ingest, and
     enrich_accession_with_fits() to identify an existing unbagged accession.
-    The legacy progress callback reports identification in inventory order.
+    The progress callback reports identification in inventory order.
     """
     if fits_workers not in (1, 2):
         raise ValueError("fits_workers must be 1 or 2")
     xml_path = ingest_accession(data_directory, output_folder, accession_number,
                                 move_files, clean_files_only)
     return enrich_accession_with_fits(
-        Path(output_folder) / accession_number, xml_path,
+        collection_directory(output_folder, accession_number), xml_path,
         fits_home=fits_home, fits_workers=fits_workers,
         progress_callback=progress_callback,
     )
@@ -478,13 +497,29 @@ def ingest_accession(data_directory, output_folder, accession_number,
                      move_files=False, clean_files_only=None, progress_callback=None):
     """Transfer files and write the baseline inventory without configuring FITS.
 
-    Returns <output_folder>/<accession_number>.xml. UUIDs, sizes and SHA-256 digests are
+    Returns a new XML inventory in <output>/<accession>/<accession>_Docs/. UUIDs, sizes and SHA-256 digests are
     created here; enrich_accession_with_fits preserves them. This is a fresh
     ingest operation, not a resume/merge operation for an existing inventory.
     """
-    data_directory  = Path(data_directory)
+    data_directory  = Path(data_directory).resolve()
     output_folder   = Path(output_folder)
-    accession_folder = output_folder / accession_number
+    if clean_files_only is not None:
+        clean_files_only = {Path(path).resolve() for path in clean_files_only}
+    if not data_directory.is_dir():
+        raise ValueError("Ingest requires an existing source directory")
+    wrapper = collection_directory(output_folder, accession_number)
+    accession_folder = wrapper / data_directory.name
+    if accession_folder.is_relative_to(data_directory.resolve()) or data_directory.resolve().is_relative_to(accession_folder):
+        raise ValueError("Input Directory and accession directory must not contain one another.")
+    if wrapper.exists():
+        raise FileExistsError(f"Collection destination already exists; ingest will not overwrite it: {wrapper}")
+    try:
+        status = load_status(output_folder, accession_number)
+    except FileNotFoundError:
+        status = create_status(output_folder, accession_number, collection_name=data_directory.name, layout="unknown")
+    if status["collection_name"] != data_directory.name:
+        raise ValueError("Source collection name differs from the recorded accession collection")
+    documentation_dir(output_folder, accession_number)
     accession_folder.mkdir(parents=True, exist_ok=True)
 
     dir_times = {}
@@ -500,7 +535,7 @@ def ingest_accession(data_directory, output_folder, accession_number,
         f"Transferred on {datetime.now().isoformat()}"
     )
 
-    total_files = (sum(1 for p in data_directory.rglob("*")
+    total_files = (sum(1 for p in collection_paths(data_directory)
                        if p.is_file() and (clean_files_only is None or p in clean_files_only))
                    if progress_callback is not None else 0)
     completed = 0
@@ -515,7 +550,7 @@ def ingest_accession(data_directory, output_folder, accession_number,
     def finish_file(dest_path, rel_path, checksum):
         file_el = LET.SubElement(
             accession_el, "file",
-            name=str(rel_path.as_posix()),
+            name=(Path(data_directory.name) / rel_path).as_posix(),
             size=str(dest_path.stat().st_size),
             SHA256=checksum,
         )
@@ -534,13 +569,14 @@ def ingest_accession(data_directory, output_folder, accession_number,
         ).text = str(uuid.uuid4())
         add_object_characteristics(premis_obj, checksum, dest_path.stat().st_size)
 
-    for file_path in data_directory.rglob("*"):
+    for file_path in collection_paths(data_directory):
 
         # Record directory timestamps so we can restore them after copying
         if file_path.is_dir():
             stat = file_path.stat()
             rel  = file_path.relative_to(data_directory)
-            dir_times[rel] = (stat.st_atime, stat.st_mtime)
+            dir_times[rel] = (stat.st_atime_ns, stat.st_mtime_ns)
+            (accession_folder / rel).mkdir(parents=True, exist_ok=True)
 
         if not file_path.is_file():
             continue
@@ -558,6 +594,8 @@ def ingest_accession(data_directory, output_folder, accession_number,
         dest_path = accession_folder / rel_path
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if os.path.lexists(dest_path):
+            raise FileExistsError(f"Refusing to replace an existing collection file: {dest_path}")
         if move_files:
             shutil.move(str(file_path), str(dest_path))
         else:
@@ -572,7 +610,7 @@ def ingest_accession(data_directory, output_folder, accession_number,
         finish_file(dest_path, rel_path, checksum)
         completed += 1
 
-    xml_output_file = output_folder / f"{accession_number}.xml"
+    xml_output_file = new_document(output_folder, f"{accession_number}.xml", accession_number)
     LET.ElementTree(collection_el).write(
         str(xml_output_file),
         encoding="UTF-8",
@@ -586,7 +624,7 @@ def ingest_accession(data_directory, output_folder, accession_number,
         dest_dir = accession_folder / rel_path
         if dest_dir.exists():
             try:
-                os.utime(dest_dir, (atime, mtime))
+                os.utime(dest_dir, ns=(atime, mtime))
             except Exception:
                 pass
 
@@ -848,7 +886,7 @@ def _bag_preflight(accession_folder, accession_number, contact_name, contact_ema
         if storage_option not in APTRUST_STORAGE_OPTIONS:
             raise ValueError(f"Invalid APTrust Storage-Option: {storage_option!r}")
 
-    entries = sorted(root.iterdir())
+    entries = sorted(entry for entry in root.iterdir() if not is_managed_documentation(entry))
     reserved = {"data", "bagit.txt", "bag-info.txt", "aptrust-info.txt", "fetch.txt"}
     for entry in entries:
         name = entry.name.casefold()
@@ -861,13 +899,10 @@ def _bag_preflight(accession_folder, accession_number, contact_name, contact_ema
     payload = {}
     seen = set()
 
-    def walk_error(exc):
-        raise exc
-
     # Do not follow links/reparse directories: they could escape the accession
     # or change meaning when relocated. Reject names this manifest writer cannot
     # represent unambiguously rather than silently encoding a different path.
-    for directory, directories, filenames in os.walk(root, onerror=walk_error, followlinks=False):
+    for directory, directories, filenames in collection_walk(root):
         for name in sorted(directories + filenames):
             path = Path(directory) / name
             rel = path.relative_to(root).as_posix()
@@ -974,27 +1009,48 @@ def construct_bag(accession_folder, accession_number, contact_name="", contact_e
     return root
 
 
-def serialize_bag_to_tar(bag_path):
-    """Serialize an existing bag to a sibling <bag-name>.tar and return its Path.
+def serialize_bag_to_tar(bag_path, *, overwrite=False):
+    """Serialize a fresh, versioned collection and documentation snapshot.
 
-    Checks basic structure only, not checksums or APTrust compliance. Does not
+    The legacy overwrite argument is accepted for compatibility but never permits
+    replacement. Check basic structure, not checksums or APTrust compliance. Does not
     construct, validate, move payload or regenerate manifests. Failed writes or
-    replacement preserve a previous TAR; the bag must remain unchanged meanwhile.
+    publication preserve previous TARs; the bag must remain unchanged meanwhile.
     """
     root = Path(bag_path).resolve()
     if (not root.is_dir() or not (root / "data").is_dir()
             or not (root / "bagit.txt").is_file()
             or not any(p.is_file() for p in root.glob("manifest-*.txt"))):
         raise ValueError(f"Expected an existing BagIt directory: {root}")
-    tar_path = root.parent / (root.name + ".tar")
+    parent = root.parent
+    status = load_status(parent.parent, parent.name)
+    if collection_directory(parent.parent, parent.name) != root:
+        raise ValueError("TAR requires the accession collection wrapper")
+    docs = documentation_dir(parent.parent, parent.name)
+    tar_path = parent / (parent.name + ".tar")
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=root.parent, prefix=tar_path.name + ".",
                                          suffix=".tmp", delete=False) as stream:
             temporary = Path(stream.name)
         with tarfile.open(temporary, "w") as archive:
-            archive.add(root, arcname=root.name)
-        os.replace(temporary, tar_path)
+            archive.add(root, arcname=f"{parent.name}/{root.name}")
+            archive.add(docs, arcname=f"{parent.name}/{docs.name}")
+        # Publish only a fully written archive. Hard-link creation is atomic and
+        # fails for any occupied name (including directories and dangling links).
+        # Never fall back to replacement on filesystems without hard-link support.
+        version = 1
+        while True:
+            tar_path = parent / (parent.name + (f"_v{version}" if version > 1 else "") + ".tar")
+            if os.path.lexists(tar_path):
+                version += 1
+                continue
+            try:
+                os.link(temporary, tar_path)
+                break
+            except FileExistsError:
+                version += 1
+        logging.info("Selected preservation package output: %s", tar_path)
     except Exception:
         logging.exception("TAR serialization failed for %s; previous deliverable retained.", root)
         raise
@@ -1013,7 +1069,7 @@ def create_bag(accession_folder, accession_number, contact_name="", contact_emai
                access="Institution", storage_option="Standard",
                description="", serialize_tar=False, validate=False,
                xml_manifest=None):
-    """Compatibility wrapper: construct, optionally validate, optionally serialize.
+    """Construct, optionally validate, and optionally serialize a collection bag.
 
     Return (bag_path, tar_path, bag_valid, bag_error); bag_valid is None if not
     requested. Requested validation failure blocks TAR creation. As before,
@@ -1046,7 +1102,7 @@ def validate_bag(bag_path, result_callback=None):
     Validate an existing BagIt bag directory.
     Returns (is_valid: bool, error_message: str).
     Optional result_callback distinguishes invalid findings from execution or
-    dependency errors without changing the legacy two-value return contract.
+    dependency errors without changing the two-value return contract.
     """
     if not BAGIT_AVAILABLE:
         if result_callback is not None:
@@ -1077,15 +1133,15 @@ def run_fixity(xml_input, output_folder, accession_number):
     """
     Verify algorithm-identified checksums recorded in the XML manifest against files on disk.
     Resolve logical inventory paths inside data/ for an existing BagIt package.
-    Writes a CSV report and log file to output_folder.
+    Writes CSV and LOG reports to <output>/<accession>/<accession>_Docs/.
     """
     output_folder    = Path(output_folder)
     from pipeline_state import bag_layout, resolve_payload_root
-    accession = output_folder / accession_number
+    accession = collection_directory(output_folder, accession_number)
     accession_folder = resolve_payload_root(accession, bag_layout(accession))
 
-    log_file = output_folder / f"fixity_{accession_number}.log"
-    csv_file = output_folder / f"fixity_{accession_number}.csv"
+    log_file = new_document(output_folder, f"fixity_{accession_number}.log", accession_number)
+    csv_file = new_document(output_folder, f"fixity_{accession_number}.csv", accession_number)
 
     # Use an isolated named logger so the pipeline's root logger is not disturbed
     fixity_log = logging.getLogger(f"fixity.{accession_number}")
@@ -1179,7 +1235,7 @@ def generate_summary_report(csv_file, output_folder, accession_number):
             if mime:
                 mime_counter[mime] += 1
 
-    output_txt = Path(output_folder) / f"{accession_number}.txt"
+    output_txt = new_document(output_folder, f"{accession_number}.txt", accession_number)
 
     with open(output_txt, "w", encoding="utf-8") as f:
         f.write(f"Accession: {accession_number}\n\n")

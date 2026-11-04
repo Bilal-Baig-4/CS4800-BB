@@ -31,6 +31,20 @@ See [Installation](install/INSTALLATION.md) to install dependencies and run the 
 - How the function works:
     - Transforms the XML report into CSV and HTML reports
     - Includes file metadata and checksums
+
+**Metadata Output Fields**
+
+The CSV report contains one row per file with the following information:
+
+| Field                                           | Description                                       |
+| ----------------------------------------------- | ------------------------------------------------- |
+| `directory path`, `file name`, `file extension` | File location, name, and extension.               |
+| `last modified`, `size (bytes)`                 | Last modified date and file size.                 |
+| `SHA-256`, `MD5`                                | Checksums used to verify file integrity.          |
+| `file format`, `format version`                 | File format and version identified by FITS.       |
+| `format registry key/PUID`, `MIME Type`         | Standard identifiers describing file formats.     |
+| `Identified By`, `ID Warning`                   | Format identification tool and recorded warnings. |
+
 - Sample output
     - CSV:
       <img width="1780" height="193" alt="image" src="https://github.com/user-attachments/assets/77c7f8d0-6a58-4055-b66a-3265235e2fa6" />
