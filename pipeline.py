@@ -1010,11 +1010,12 @@ def construct_bag(accession_folder, accession_number, contact_name="", contact_e
 
 
 def serialize_bag_to_tar(bag_path, *, overwrite=False):
-    """Serialize the collection bag and documentation snapshot to <accession>/<accession>.tar.
+    """Serialize a fresh, versioned collection and documentation snapshot.
 
-    Require an explicit overwrite for an existing TAR. Check basic structure, not checksums or APTrust compliance. Does not
+    The legacy overwrite argument is accepted for compatibility but never permits
+    replacement. Check basic structure, not checksums or APTrust compliance. Does not
     construct, validate, move payload or regenerate manifests. Failed writes or
-    replacement preserve a previous TAR; the bag must remain unchanged meanwhile.
+    publication preserve previous TARs; the bag must remain unchanged meanwhile.
     """
     root = Path(bag_path).resolve()
     if (not root.is_dir() or not (root / "data").is_dir()
@@ -1027,8 +1028,6 @@ def serialize_bag_to_tar(bag_path, *, overwrite=False):
         raise ValueError("TAR requires the accession collection wrapper")
     docs = documentation_dir(parent.parent, parent.name)
     tar_path = parent / (parent.name + ".tar")
-    if tar_path.exists() and not overwrite:
-        raise FileExistsError(f"Completed TAR already exists; explicitly request a rerun to replace it: {tar_path}")
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=root.parent, prefix=tar_path.name + ".",
@@ -1037,7 +1036,21 @@ def serialize_bag_to_tar(bag_path, *, overwrite=False):
         with tarfile.open(temporary, "w") as archive:
             archive.add(root, arcname=f"{parent.name}/{root.name}")
             archive.add(docs, arcname=f"{parent.name}/{docs.name}")
-        os.replace(temporary, tar_path)
+        # Publish only a fully written archive. Hard-link creation is atomic and
+        # fails for any occupied name (including directories and dangling links).
+        # Never fall back to replacement on filesystems without hard-link support.
+        version = 1
+        while True:
+            tar_path = parent / (parent.name + (f"_v{version}" if version > 1 else "") + ".tar")
+            if os.path.lexists(tar_path):
+                version += 1
+                continue
+            try:
+                os.link(temporary, tar_path)
+                break
+            except FileExistsError:
+                version += 1
+        logging.info("Selected preservation package output: %s", tar_path)
     except Exception:
         logging.exception("TAR serialization failed for %s; previous deliverable retained.", root)
         raise
