@@ -534,6 +534,8 @@ def format_run_confirmation(plan, options):
             if len(stages) > 1:
                 lines.extend(f"  • {labels[item['stage']]}" for item in running)
         for item in entries:
+            if item["action"] not in ("review", "block"):
+                continue
             if item["reason"] == "not_requested" or item["stage"] in grouped_warnings:
                 continue
             reason = item["reason"]
@@ -572,9 +574,18 @@ def format_run_confirmation(plan, options):
         lines = ["No steps need to run."]
     elif not any(item["action"] == "run" for item in plan):
         lines = ["No processing steps are selected to run."]
-    if not blocked and any(item["action"] == "reuse" for item in plan):
+    previous_steps = (options.get("_status_snapshot") or {}).get("steps", {})
+    rerunning_completed = any(
+        item["action"] == "run" and (
+            previous_steps.get(item["stage"], {}).get("state") == "completed"
+            or item["reason"] in ("explicit_safe_rerun", "completed_outputs_missing")
+        ) for item in plan
+    )
+    if not blocked and rerunning_completed:
+        lines.extend(["", "Previously completed selected steps will run again. All other steps will be skipped."])
+    elif not blocked and any(item["action"] == "reuse" for item in plan):
         lines.extend(["", "Previously completed steps will be reused automatically."])
-    if not blocked and any(all(by_stage[s]["reason"] == "not_requested" for s in stages) for _, stages in groups):
+    if not blocked and not rerunning_completed and any(all(by_stage[s]["reason"] == "not_requested" for s in stages) for _, stages in groups):
         lines.extend(["", "Other steps will not run."])
     if attention:
         lines.extend(["", "Please note:", *dict.fromkeys(attention)])
