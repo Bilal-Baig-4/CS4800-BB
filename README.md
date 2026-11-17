@@ -2,6 +2,10 @@
 
 Automation for Data Accessioner, FITS, XSLTProcessor, hashlib, Microsoft Defender, and DART.
 
+[Installation](install/INSTALLATION.md) · [How to Use](HOW_TO_USE.md)
+
+---
+
 ## Installation
 
 See [Installation](install/INSTALLATION.md) to install dependencies and run the application.
