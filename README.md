@@ -70,7 +70,7 @@ The CSV report contains one row per file with the following information:
 
 - Uses Microsoft Defender on Windows for an optional antivirus scan before ingest.
 - If Microsoft Defender is unavailable, processing can continue without antivirus scanning.
-- Other antivirus scanners are not currently supported. Developers can modify `run_antivirus_scan()` in `pipeline.py` and the related GUI integration to use another scanner.
+- Other antivirus scanners are not currently supported. See [Developer Options](DEVELOPER_OPTIONS.md) for instructions on integrating a different antivirus scanner.
 
 ## Bagging function (optional)
 - Packages files and metadata using BagIt with SHA-256 manifests and tag manifests.
