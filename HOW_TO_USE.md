@@ -29,7 +29,7 @@ python GUI.py
 | 2. Identify File Formats | Identifies file formats and adds technical information to the accession XML. |
 | 3. Generate Metadata Reports | Creates CSV and HTML reports and a text summary from the accession metadata. |
 | 4. Verify File Integrity | Checks accession files against their recorded checksums and reports mismatches and missing files. |
-| 5. BagIt Packaging (optional) | Creates and validates a standard preservation package. Select **Serialize to .tar (required for APTrust upload)** if you need a TAR archive. |
+| 5. BagIt Packaging (optional) | Creates a preservation package for an unbagged accession. Select **Validate bag after creation** separately to check the bag. With the **APTrust** profile, select **Serialize to .tar (required for APTrust upload)** separately to create a TAR archive. |
 
 During Ingest, you can select **Scan files with Microsoft Defender** to request a virus scan before transfer when Defender is available. Select **Move files instead of copy** if you want successfully transferred files removed from the input folder. Copying keeps the originals in place.
 

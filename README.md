@@ -2,13 +2,9 @@
 
 Automation for Data Accessioner, FITS, XSLTProcessor, hashlib, Microsoft Defender, and DART.
 
-[Installation](install/INSTALLATION.md) · [How to Use](HOW_TO_USE.md)
+[Installation](install/INSTALLATION.md) · [How to Use](HOW_TO_USE.md) · [Developer Options](DEVELOPER_OPTIONS.md)
 
 ---
-
-## Installation
-
-See [Installation](install/INSTALLATION.md) to install dependencies and run the application.
 
 ## Data Accessioner
 - Transfers files from disks onto a file server
@@ -84,3 +80,9 @@ The CSV report contains one row per file with the following information:
 ## Resume / Status
 - Processing steps can be selected and run separately.
 - The pipeline keeps a status file so users can return later and continue unfinished processing.
+
+## Contributors
+
+- **Quinn Hamilton** — Started the project.
+- **Will Palma** — Contributed to project development.
+- **Bilal Baig** — Contributed to project development.
